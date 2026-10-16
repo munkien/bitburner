@@ -85,6 +85,28 @@ export function createChangeWatcher(ns: NS): ChangeWatcher {
     // is not a file to restart on the strength of a later read succeeding.
     if ((boot.get(self.filename) ?? -1) < 0) return DISABLED;
 
+    // A NEW FILE IS A CHANGE, and it is the case the boot walk alone cannot see.
+    //
+    // `boot` is built once, from the tree as it stood at boot. A file added afterwards
+    // — a new feature, a new `lib/` module — is pushed by file sync and then never
+    // watched, because it is not a key in `boot` and `firstChanged` iterates that map.
+    // So the file arrives and NOTHING RELOADS, which is precisely the "an edit silently
+    // has no effect" trap this module exists to remove, reappearing for new files.
+    //
+    // The rescan is affordable. `ns.ls` is already called at boot for the same walk, so
+    // its 0.2 GB is a STATIC cost this script pays whether or not the rescan happens;
+    // `getFileMetadata` is free. The tree is ~55 files and this runs once a second.
+    const scanForNew = (): string | null => {
+        for (const file of discoverTree(ns, self.filename)) {
+            if (boot.has(file)) continue;
+            // Not merely present but readable: a file mid-write has no usable mtime,
+            // and spawning into a half-synced script is worse than waiting a second.
+            if (readMtime(ns, file) === null) continue;
+            return file;
+        }
+        return null;
+    };
+
     let fired = false;
 
     return {
@@ -94,7 +116,10 @@ export function createChangeWatcher(ns: NS): ChangeWatcher {
             // over, and a second spawn from a dying script would start a duplicate.
             if (fired) return false;
 
-            const changed = firstChanged(ns, boot);
+            // Modified files first, so an edit to existing code is reported ahead of a
+            // new file that arrived in the same sync — the edit is what the reader is
+            // usually looking for.
+            const changed = firstChanged(ns, boot) ?? scanForNew();
             // Nothing changed. A file that vanished reads as -1, which is not a
             // change — spawning into a missing file would fail.
             if (changed === null) return false;
