@@ -1,5 +1,7 @@
 import type { NS } from "@ns";
 
+import { SF_GANG } from "./gangs.ts";
+
 /*
  * ============================================================================
  * CAPABILITY DETECTION
@@ -33,7 +35,8 @@ import type { NS } from "@ns";
  * N, which is why requirements are always expressed as "SF n or BitNode n".
  */
 export const SF = {
-    GANG: 2,
+    /** The gang Source File, which `lib/gangs.ts` also names — one number, one source. */
+    GANG: SF_GANG,
     SINGULARITY: 4,
     FORMULAS: 5,
     BLADEBURNER: 6,
@@ -72,6 +75,7 @@ export const BLADES_SIMULACRUM = "The Blade's Simulacrum";
 export const CAPABILITY_KEYS = [
     "singularity",
     "gang",
+    "createGang",
     "bladeburner",
     "bladesSimulacrum",
     "sleeves",
@@ -152,6 +156,17 @@ const RULES: Readonly<Record<CapabilityKey, CapabilityRule>> = {
         label: "Gang API",
         ...sfOrNode(SF.GANG),
         probe: { key: "gangMember", mode: "and", missing: "not currently in a gang" },
+    },
+    createGang: {
+        label: "Gang creation",
+        ...sfOrNode(SF.GANG),
+        // Deliberately NO membership probe, following the Bladeburner rule below.
+        //
+        // Separate from `gang` above, which is the "already in one" rule. With
+        // `gangMember` here this capability would be false at exactly the moment the
+        // feature that creates a gang needed to run — gating an action behind its own
+        // outcome. BitNode 2 also allows a gang without Source File 2, so it cannot be
+        // an SF-only rule either; `sfOrNode` covers both.
     },
     bladeburner: {
         label: "Bladeburner API",

@@ -20,7 +20,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { canBuyReputation, DONATION_MIN_FAVOR, type FactionRep } from "./context.ts";
+import { canBuyReputation, DONATION_MIN_FAVOR } from "./context.ts";
+import type { FactionRep } from "./objective.ts";
 
 const rep = (favor: number): FactionRep => ({
     faction: "CyberSec" as FactionRep["faction"],

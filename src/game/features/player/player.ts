@@ -18,7 +18,8 @@ import {
 } from "./progression.ts";
 import type { Goal } from "../../lib/objective.ts";
 import { GOAL_TARGETS } from "../../lib/objective.ts";
-import { ChangeLog, note, publishStatus, type RecentLines } from "../../lib/log.ts";
+import { GANG_CHOICE_FLAG, GANG_KARMA, chosenGangKind, gangFactionFor, gangKindOf, type GangKind } from "../../lib/gangs.ts";
+import { ChangeLog, announce, note, publishStatus, type RecentLines } from "../../lib/log.ts";
 import { bladeburnerKeepsSlot, hasActiveBlackOp, hasActiveGraft, publishTrainingRate, trainingRemaining, winnableBlackOp } from "./activity.ts";
 import type { Context } from "../../lib/context.ts";
 import type {
@@ -265,6 +266,16 @@ let targetAugment: AugTarget | null = null;
  */
 let reason = "starting";
 
+/**
+ * The gang kind this run committed to, for the status line.
+ *
+ * Kept as module state rather than re-read per call because reading it means a file
+ * check and possibly a file write (`gangKindFor`), and the status is built on every tick.
+ * The value cannot change within a run — the flag is written once — so one read is
+ * enough, and `undefined` means "not asked yet" rather than "no gang".
+ */
+let gangKindLabel: string | undefined;
+
 export function tick(ns: NS, context: Context): void {
     log ??= new ChangeLog(ns, "ACTION");
     log.updateNs(ns);
@@ -273,7 +284,12 @@ export function tick(ns: NS, context: Context): void {
     // Registered once, read by the orchestrator when it builds telemetry. The
     // getter is a closure over the module state above, so the orchestrator sees the
     // value this tick set rather than a copy taken at registration.
-    publishStatus("progression", () => reason);
+    // The getter is called by the orchestrator when it builds telemetry, so it reads the
+    // CURRENT `reason` rather than the value at registration — which is also why the gang
+    // label can be appended here even though `prioritizeAction` sets it later in the pass.
+    publishStatus("progression", () =>
+        gangKindLabel === undefined ? reason : `${reason} · ${gangKindLabel}`,
+    );
 
     // BitNode 8 has no augment purchases, only grafting, so the whole purchase
     // pipeline — the reserve, donations, faction rep-farming — is switched off
@@ -325,7 +341,7 @@ export function tick(ns: NS, context: Context): void {
     // `passiveTasks` runs on every path, whoever holds the slot: backdoors,
     // augment purchases and donations never touch the activity slot, so gating
     // them on it would starve them whenever any work was running.
-    passiveTasks(ns, player, context.recent, canBuyAugs);
+    passiveTasks(ns, player, context.recent, canBuyAugs, context.capabilities.has("createGang"), context.capabilities.bitNode);
 
     // A Bladeburner black op owns the slot. Progression yields in both cases:
     //
@@ -390,7 +406,7 @@ export function tick(ns: NS, context: Context): void {
         return;
     }
 
-    const chosen = prioritizeAction(ns, player, context.goal, context.recent, canBuyAugs);
+    const chosen = prioritizeAction(ns, player, context.goal, context.recent, canBuyAugs, context.capabilities.has("createGang"), context.capabilities.bitNode);
     if (chosen === null) {
         reason = "nothing to do: the priority chain returned no action";
         return;
@@ -492,6 +508,8 @@ function prioritizeAction(
     goal: Goal | null,
     recent: RecentLines,
     canBuyAugs: boolean,
+    canCreateGang: boolean,
+    bitNode: number,
 ): PlayerAction | null {
     // 1. Backdoor faction servers
     const host = findBackdoor(ns, player);
@@ -523,6 +541,34 @@ function prioritizeAction(
     // dropping karma past the target, and very low karma closes off other content.
     if (!getGangFaction(ns) && karmaFarmingWanted(player, goal)) {
         return { kind: "CRIME", crime: "Homicide" };
+    }
+
+    // 2b. Work toward the faction the gang needs, once karma is out of the way.
+    //
+    // AFTER the karma step, not before: every combat gang requires karma and most
+    // require kills, so training stats for a faction that would refuse the player anyway
+    // spends time against a gate that is not the binding one. A hacking gang needs
+    // neither, and its faction is reached by backdoor, which step 1 already does.
+    //
+    // The JOIN itself needs nothing here. `joinInvites` accepts every invitation the
+    // game offers, gang factions included, so membership arrives on its own once the
+    // prerequisite is met. What this step contributes is the CHOICE — without it the run
+    // would drift toward whichever gang faction it happened to qualify for, and the
+    // coin toss in `gangKindFor` would decide nothing.
+    const gangWant = gangTarget(ns, player, canCreateGang, bitNode);
+    if (gangWant !== null) {
+        // Published so a permanent coin toss is not invisible. The kind cannot be changed
+        // once the gang exists, so a run that went the wrong way should be legible in the
+        // console rather than only inferable from the gang feature's behaviour later.
+        gangKindLabel = `${gangKindOf(gangWant.faction)} gang via ${gangWant.faction}${
+            gangWant.haveIt ? "" : " (joining)"
+        }`;
+    } else {
+        gangKindLabel = getGangFaction(ns) !== null ? "founded" : undefined;
+    }
+    if (gangWant?.haveIt === false) {
+        const train = trainForGangFaction(ns, player, gangWant.faction);
+        if (train) return train;
     }
 
     // 5. Buy any affordable augments, then travel if a city faction is
@@ -595,9 +641,11 @@ function prioritizeAction(
 
 /** Things that never touch the player's current action: backdoors, augment
  *  purchases and faction donations. */
-function passiveTasks(ns: NS, player: Player, recent: RecentLines, canBuyAugs: boolean): void {
+function passiveTasks(ns: NS, player: Player, recent: RecentLines, canBuyAugs: boolean, canCreateGang: boolean, bitNode: number): void {
     const host = findBackdoor(ns, player);
     if (host) runBackdoor(ns, host);
+
+    tryCreateGang(ns, player, canCreateGang, bitNode);
 
     const owned = ns.singularity.getOwnedAugmentations(true);
     if (canBuyAugs) buyAffordableAugments(ns, player, owned, recent);
@@ -605,6 +653,53 @@ function passiveTasks(ns: NS, player: Player, recent: RecentLines, canBuyAugs: b
     if (canBuyAugs) {
         const target = getBestAugmentation(ns, player, owned);
         if (target && target.currentRep < target.repRequired) donateForRep(ns, target, player, recent);
+    }
+}
+
+/**
+ * Create the gang, once every prerequisite is genuinely met.
+ *
+ * A PASSIVE TASK, like the backdoor above it: it does not start work and does not take
+ * the activity slot, so it belongs here rather than in the action chain. It is also not
+ * a `PlayerAction` — that union is a set of ONGOING activities, and this is a one-shot
+ * that either succeeds or does not.
+ *
+ * WHY THE PREREQUISITES ARE CHECKED HERE instead of calling and hoping. `createGang`
+ * returns `false` for an unmet requirement and ONLY logs the reason; it does not throw.
+ * A silent false would leave the run retrying every tick with nothing said, so this
+ * decides for itself and the call is the last step rather than the test. It DOES throw
+ * on a faction name that is not a real faction, which is why the name comes from the
+ * table in `lib/gangs.ts` rather than from anywhere it could be malformed.
+ *
+ * Announced on success only. A failure that repeats every tick is the "anything that
+ * warns fifty times a second is a bug" case that `feature-runtime.ts` handles with
+ * cooldowns, and the checks above mean a failure here should be unreachable rather than
+ * routine.
+ */
+function tryCreateGang(ns: NS, player: Player, canCreateGang: boolean, bitNode: number): void {
+    const want = gangTarget(ns, player, canCreateGang, bitNode);
+    // `gangTarget` already answers "can a gang be created here", "are we in one" and
+    // "which faction"; a null or an unheld faction means there is nothing to do yet.
+    // `haveIt` false means step 2b is still working toward the membership.
+    if (want === null || !want.haveIt) return;
+
+    // Karma is the other gate the game applies, and it is checked rather than assumed
+    // because step 2 stops farming it as soon as the goal says so — and the goal targets
+    // the same figure for the late-game factions rather than for the gang (see GANG_KARMA).
+    if (player.karma > GANG_KARMA) return;
+
+    const kind = gangKindOf(want.faction);
+    if (kind === null) return;
+
+    try {
+        if (ns.gang.createGang(want.faction)) {
+            announce(ns, "PROGRESSION", `Founded a ${kind} gang in ${want.faction}`, "success");
+        }
+    } catch {
+        // `createGang` throws only on a faction name that is not a real faction, which
+        // the table rules out, and returns FALSE silently for an unmet requirement. The
+        // checks above are therefore the real gate; this catch only stops a surprise
+        // faulting the whole pass, and the next tick re-checks.
     }
 }
 
@@ -1151,6 +1246,65 @@ function etaSeconds(stat: Stat, gap: number): number {
     return floorEtaSeconds({ target: gap }, 0, rate ?? Number.NaN);
 }
 
+/**
+ * Train toward membership of the faction the gang needs, or null when nothing is wanted.
+ *
+ * A NARROW version of `factionTraining`, for ONE named faction rather than whichever
+ * looks cheapest. That difference is the point: `factionTraining` scores every faction by
+ * gap and takes the best, which is right when the run is free to choose and wrong here,
+ * because the gang's kind was already decided by the coin toss and only one faction can
+ * serve it. Without this the run would drift toward whichever gang faction it happened to
+ * qualify for, and the toss would decide nothing.
+ *
+ * Returns null wherever training would not help — already a member, or the outstanding
+ * requirement is one training cannot move (kills, karma, money). Those mean the binding
+ * constraint is elsewhere, and returning a training action anyway is the "1.5 hours on an
+ * unreachable target" failure `training-budget.ts` exists to prevent.
+ */
+function trainForGangFaction(ns: NS, player: Player, faction: FactionName): PlayerAction | null {
+    if (isMemberOf(player, faction)) return null;
+
+    const req = FACTION_STAT_REQS[faction];
+    if (req === undefined) return null;
+
+    // The gates training cannot move. Karma is step 2's business and kills come from the
+    // crimes there; no gang faction asks for money. If one of these is unmet the run is
+    // blocked on something other than stats, and this is not the step that fixes it.
+    if (req.karma !== undefined && player.karma > req.karma) return null;
+    if (req.kills !== undefined && player.numPeopleKilled < req.kills) return null;
+    if (req.money !== undefined && player.money < req.money) return null;
+
+    const missing: { stat: "hacking" | CombatStat; gap: number }[] = [];
+    if (req.hacking && player.skills.hacking < req.hacking) {
+        missing.push({ stat: "hacking", gap: req.hacking - player.skills.hacking });
+    }
+    if (req.combat) {
+        for (const stat of COMBAT) {
+            const have = player.skills[STAT_KEYS[stat]];
+            if (have < req.combat) missing.push({ stat, gap: req.combat - have });
+        }
+    }
+    // No charisma branch: none of the seven gang factions asks for it. `FACTION_STAT_REQS`
+    // would carry it if one did, and the check is left out rather than stubbed, because a
+    // course name guessed here would be a silent failure at runtime.
+    if (!missing.length) return null;
+
+    // The same reachability rule the rest of this feature uses. A requirement whose
+    // measured rate puts it hours away is not one to commit the run to, and the gang it
+    // serves is not worth an unbounded detour — the fork in `factionTraining` applies
+    // `REACH_SEC` for exactly this reason.
+    const reachable = missing.reduce((sum, m) => sum + etaSeconds(m.stat as Stat, m.gap), 0) <= REACH_SEC;
+    if (!reachable) return null;
+
+    // The largest gap first, matching `factionTraining`'s choice of the nearest-to-met
+    // requirement. Training the smallest gap closes a requirement without moving the
+    // others; the largest is the one that actually gates membership.
+    const worst = missing.reduce((a, m) => (m.gap > a.gap ? m : a));
+    return worst.stat === "hacking"
+        ? { kind: "UNI", university: UNIVERSITY, course: UNI_HACKING, city: "Sector-12" }
+        : { kind: "GYM", gym: GYM, stat: worst.stat, city: "Sector-12" };
+}
+
 function factionTraining(ns: NS, player: Player): PlayerAction | null {
     const gang = getGangFaction(ns);
 
@@ -1252,6 +1406,63 @@ function getGangFaction(ns: NS): FactionName | null {
     } catch {
         return null;
     }
+}
+
+/**
+ * Which kind of gang this run committed to, reading the flag or deciding it.
+ *
+ * WRITES THE FLAG THE FIRST TIME IT IS ASKED. That is deliberate rather than a caller's
+ * job: the choice has to be made exactly once, and the only place that can guarantee
+ * "exactly once" is the place that reads it. Seeded from the BitNode so a lost flag is
+ * recoverable to the same answer instead of becoming a second, contradictory decision —
+ * see `chosenGangKind`.
+ *
+ * Returns null when the flag cannot be written, because a choice that will not persist
+ * is worse than no choice: the next pass would flip again and the run would work toward
+ * one kind of gang and then the other.
+ */
+function gangKindFor(ns: NS, bitNode: number): GangKind | null {
+    if (ns.fileExists(GANG_CHOICE_FLAG, "home")) {
+        const stored = ns.read(GANG_CHOICE_FLAG).trim();
+        // A flag holding anything unexpected is treated as absent rather than trusted:
+        // an unreadable choice must not silently become a wrong one.
+        if (stored === "hacking" || stored === "combat") return stored;
+    }
+
+    const kind = chosenGangKind(bitNode);
+    try {
+        ns.write(GANG_CHOICE_FLAG, kind, "w");
+    } catch {
+        return null;
+    }
+    announce(ns, "PROGRESSION", `Gang run: going for a ${kind} gang (${GANG_CHOICE_FLAG})`, "info");
+    return kind;
+}
+
+/**
+ * The faction whose membership the run needs for its gang, and whether it has it.
+ *
+ * Null when no gang can be created here at all — no Source File 2 outside BitNode 2 —
+ * because then the whole question is moot and the run should not be detoured by it.
+ *
+ * `canCreate` is passed rather than probed. The orchestrator already pays for it as the
+ * `createGang` capability, and `ns.getResetInfo()` — the call behind that probe — costs
+ * 1 GB, which is not a per-tick price this feature should be paying. It is also the same
+ * reading the orchestrator admitted the feature under, so the two cannot disagree.
+ */
+function gangTarget(
+    ns: NS,
+    player: Player,
+    canCreate: boolean,
+    bitNode: number,
+): { faction: FactionName; haveIt: boolean } | null {
+    if (!canCreate) return null;
+    if (getGangFaction(ns) !== null) return null;
+
+    const kind = gangKindFor(ns, bitNode);
+    if (kind === null) return null;
+
+    return gangFactionFor(kind, player.factions);
 }
 /**
  * Whether continuing to farm karma is still worth the player's time.

@@ -178,7 +178,13 @@ test("an untrained stat is unreachable, not unmeasurable", () => {
     // means "this measure has no rate concept at all". Conflating them made the ranking
     // degenerate: every combat goal read as unmeasurable and one goal took the head for
     // 3050 of 3094 frames of a recorded run.
-    const goals = deriveGoals(standing(player({ hacking: 100, combat: 1, karma: 0 })), new Set());
+    // `combat` is not a skill field — the helper takes the four combat skills, and
+    // `standingOf` takes their minimum. Setting them low keeps Slum Snakes (combat 30)
+    // outstanding, which is what this test is about.
+    const goals = deriveGoals(
+        standing(player({ hacking: 100, strength: 1, defense: 1, dexterity: 1, agility: 1 })),
+        new Set(),
+    );
     const zeroRate = () => 0;
     const combatGoal = goals.find(g => g.goal === "join Slum Snakes");
     assert.ok(combatGoal !== undefined, "expected the Slum Snakes goal (combat 30)");

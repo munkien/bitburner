@@ -563,7 +563,12 @@ export function tick(ns: NS, context: Context): void {
     // Resting is exempt either way. Stamina gates every action this feature can
     // take, so a rest that never happened would leave the division unusable — and
     // the player is free to train again once stamina is back.
-    const idle = !current || currentName === "Idle";
+    // `getCurrentAction()` returns NULL when nothing is running — there is no "Idle"
+    // action. This used to also test `currentName === "Idle"`, which the game can never
+    // return: `BladeburnerActionName` has no such member, and the implementation returns
+    // `null` rather than an action object when `bladeburner.action` is unset. The check
+    // was unreachable, and the `!current` half is what actually covers idleness.
+    const idle = !current;
     const wantsToStart = idle || actionExpired || needsRest || finishedResting;
 
     // A manually-started action the framework did not choose.
