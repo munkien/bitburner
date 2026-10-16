@@ -64,6 +64,26 @@ export interface Player {
     /** Milliseconds. */
     totalPlaytime: number;
     factions: string[];
+    /**
+     * What holds the activity slot, or null when it is empty.
+     *
+     * The game has ONE activity slot and several features reason about it, each able to
+     * report "yielded" while something is running. Without this the console shows two
+     * features standing down and cannot tell that from neither doing anything — which is
+     * how a course in progress read as a 43-minute deadlock. Null is the case a real
+     * stall would show, so an empty slot is the thing to look for.
+     */
+    work?: WorkProjection | null;
+}
+
+/** The activity slot's contents, flattened for the console. */
+export interface WorkProjection {
+    /** The game's discriminant: CLASS, FACTION, COMPANY, CRIME, CREATE_PROGRAM, GRAFTING. */
+    readonly type: string;
+    /** Course, faction, company, crime, program or augmentation — whichever applies. */
+    readonly what: string;
+    /** The venue for CLASS work, the work type for FACTION work, empty otherwise. */
+    readonly where: string;
 }
 
 /**

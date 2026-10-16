@@ -38,6 +38,18 @@ export function VitalsPanel({ player }: { player: Player }) {
             <dl className="stats">
                 <Stat label="location" value={player.location} />
                 <Stat label="city" value={player.city} />
+                <Stat
+                    label="work"
+                    // The activity slot's contents. An EMPTY slot is the thing worth
+                    // noticing: several features can each report "yielded" while something
+                    // runs, and without this the console cannot tell that from nobody doing
+                    // anything — which is how a course in progress was read as a deadlock.
+                    value={
+                        player.work
+                            ? `${player.work.what}${player.work.where ? ` at ${player.work.where}` : ""}`
+                            : "idle"
+                    }
+                />
                 <Stat label="karma" value={karma(player.karma)} />
                 <Stat label="kills" value={count(player.numPeopleKilled)} />
                 <Stat label="playtime" value={playtime(player.totalPlaytime)} />

@@ -58,6 +58,38 @@ export interface Player {
     entropy: number;
     totalPlaytime: number;
     factions: string[];
+    /**
+     * What the player is doing in the single activity slot, as the game reports it.
+     *
+     * WHY THIS IS ON THE WIRE. Two features can each report "yielded" while an activity
+     * is running — Bladeburner deferring to a course, progression standing down because
+     * the course it wants is already in the slot. From the status lines alone that is
+     * indistinguishable from the two standing down and NOTHING happening, which is what
+     * it was read as: a 43-minute "deadlock" that was actually a course in progress.
+     *
+     * Exp movement was used to guess at this and it is not evidence — a class raises
+     * exp whether or not the framework is doing anything sensible. The slot's actual
+     * contents are the fact, so it is reported rather than inferred.
+     *
+     * Null when the slot is empty, which is the case a genuine deadlock would show.
+     */
+    work: WorkProjection | null;
+}
+
+/**
+ * The current work, flattened to plain fields.
+ *
+ * `ns.singularity.getCurrentWork()` returns a discriminated union whose shape varies by
+ * type, and the console only needs to name it. `type` plus whichever identifying fields
+ * exist is enough to tell a course from a gym session from a contract.
+ */
+export interface WorkProjection {
+    /** The game's discriminant: CLASS, FACTION, COMPANY, CRIME, CREATE_PROGRAM, … */
+    readonly type: string;
+    /** Course name, faction name, company, crime, or program — whichever applies. */
+    readonly what: string;
+    /** For CLASS work, the venue. Empty otherwise. */
+    readonly where: string;
 }
 
 /**
@@ -249,7 +281,36 @@ function projectPlayer(ns: NS): Player {
         entropy: p.entropy,
         totalPlaytime: p.totalPlaytime,
         factions: [...p.factions],
+        work: projectWork(ns),
     };
+}
+
+/**
+ * What holds the activity slot, or null when it is empty.
+ *
+ * Never throws: `getCurrentWork` needs the Singularity API, and a run without it must
+ * report "nothing running" rather than fault the telemetry that everything else reads.
+ */
+function projectWork(ns: NS): WorkProjection | null {
+    let task: ReturnType<NS["singularity"]["getCurrentWork"]>;
+    try {
+        task = ns.singularity.getCurrentWork();
+    } catch {
+        return null;
+    }
+    if (task === null) return null;
+
+    // One case per variant of the game's `Task` union. Written as a switch on the
+    // discriminant rather than a field probe, so a variant added to the game is a
+    // compile error here rather than a blank row in the console.
+    switch (task.type) {
+        case "CLASS": return { type: task.type, what: task.classType, where: task.location };
+        case "COMPANY": return { type: task.type, what: task.companyName, where: "" };
+        case "CREATE_PROGRAM": return { type: task.type, what: task.programName, where: "" };
+        case "CRIME": return { type: task.type, what: task.crimeType, where: "" };
+        case "FACTION": return { type: task.type, what: task.factionName, where: task.factionWorkType };
+        case "GRAFTING": return { type: task.type, what: task.augmentation, where: "" };
+    }
 }
 
 /**
