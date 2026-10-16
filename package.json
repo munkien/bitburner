@@ -1,0 +1,31 @@
+{
+  "type": "module",
+  "dependencies": {
+    "@syncstate/core": "^0.7.0",
+    "bitburner-filesync": "^1.2.0-beta4",
+    "cors": "^2.8.6",
+    "express": "^5.3.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  },
+  "scripts": {
+    "dev:server": "node --experimental-strip-types --watch src/server/server.ts",
+    "start:server": "node --experimental-strip-types src/server/server.ts",
+    "check:game": "node scripts/check-game-imports.mjs",
+    "test": "node --experimental-transform-types --test 'src/game/**/*.test.ts'",
+    "run:summary": "node scripts/run-summary.mjs",
+    "sync": "npm run check:game && bitburner-filesync",
+    "build:ui": "vite build --mode ui",
+    "dev:ui": "vite --mode ui"
+  }
+}

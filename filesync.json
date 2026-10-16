@@ -1,0 +1,26 @@
+{
+    "allowedFiletypes": [
+        ".js",
+        ".ts",
+        ".tsx",
+        ".script",
+        ".json",
+        ".txt"
+    ],
+    "allowDeletingFiles": true,
+    "port": 12525,
+    "scriptsFolder": "./src/game",
+    "exclude": [
+        ".vscode",
+        ".idea",
+        ".github",
+        ".agents"
+    ],
+    "quiet": false,
+    "dry": false,
+    "definitionFile": {
+        "update": true,
+        "location": "NetscriptDefinitions.d.ts"
+    },
+    "pushAllOnConnection": true
+}

@@ -1,0 +1,41 @@
+{
+  "compilerOptions": {
+    "noImplicitAny": false,
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "paths": {
+      "@ns": [
+        "./NetscriptDefinitions.d.ts"
+      ],
+      "@/*": [
+        "./*"
+      ],
+      "*": [
+        "./*"
+      ],
+      "/*": [
+        "./*"
+      ]
+    }
+  },
+  "include": [
+    "**/*"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules"
+  ],
+  "files": [
+    "NetscriptDefinitions.d.ts",
+    "NetscriptGlobals.d.ts"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+    "bitburnerSync.autoStart": true,
+    "bitburnerSync.syncDirectory": "/",
+    "bitburnerSync.fileExtensions": [
+        ".js",
+        ".ts",
+        ".jsx",
+        ".tsx",
+        ".txt",
+        ".json",
+        ".css",
+        ".py"
+    ]
+}
