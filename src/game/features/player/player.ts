@@ -417,7 +417,7 @@ export function tick(ns: NS, context: Context): void {
     // the chosen action is not training, that patience is not being spent, so the budget is
     // released — otherwise a run that trained for fourteen minutes, went and did faction
     // work, and came back would be capped one minute into the second stretch.
-    if (!capApplies(chosen.kind)) clearTrainingClock(ns);
+    if (!capApplies(chosen.kind)) clearTrainingClock();
 
     // ONE ACTION PER TICK, and travel is an action.
     //
@@ -1099,7 +1099,7 @@ function statFloor(ns: NS, player: Player, goal: Goal | null): PlayerAction | nu
     // trained indefinitely, which is the reported complaint. A clock does not care whether
     // the target is reachable: after `TRAIN_CAP_MS` the run stops regardless, and
     // `TRAIN_COOLDOWN_MS` must pass before it can start again.
-    const cap = trainCapVerdict(ns);
+    const cap = trainCapVerdict();
     if (cap === "capped") {
         log?.change(
             "training-cap", "Training", "paused",

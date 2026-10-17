@@ -5,7 +5,7 @@
  * A hard wall-clock limit on gym and university training, with a cooldown after it.
  *
  * WHY THIS EXISTS. The reachability budget (`REACH_SEC`) refuses a target it can measure
- * as too far away — but it refuses nothing when the rate is UNKNOWN, which is the common
+ * as too far away — but refuses nothing when the rate is UNKNOWN, which is the common
  * case: `floorReachable` returns "keep training" for a null or infinite rate, on the
  * reasoning that refusing on no evidence would stop a fresh run from ever training. The
  * result is that a stat the rate model cannot see is trained indefinitely, which is the
@@ -20,19 +20,13 @@
  * cost reputation or a backdoor for no gain. `capApplies` is the single place that says
  * so, so the rule cannot drift between callers.
  *
- * WHY IT PERSISTS TO A FILE. The orchestrator self-restarts on every file edit, and a
- * module variable would reset to "just started" each time — so a run that is edited often
- * would never reach fifteen minutes, which is the opposite of the intent. The state is
- * two numbers on disk instead, which survive a restart the same way the gang choice does.
- *
- * THE STATE IS SELF-HEALING. Every read reconciles against the clock: a spent budget is
- * not returned until the cooldown has passed, and a stale record from a previous run is
- * discarded rather than inherited. Nothing here needs a cleanup step, because a file that
- * says something impossible is simply rewritten.
+ * THE CLOCK IS IN MEMORY, so restarting `nexus.ts` resets it. That is the intended
+ * behaviour: a restart is an explicit act, and treating it as "the run is new" is simpler
+ * than persisting a budget and reconciling it against the clock on every read. The cost
+ * is that a file edit — which restarts the orchestrator through `self-restart.ts` — also
+ * resets it, so the cap is only fully in force on a run left alone.
  * ============================================================================
  */
-
-import type { NS } from "@ns";
 
 /** How long a stretch of training may run before it must stop. */
 export const TRAIN_CAP_MS = 15 * 60_000;
@@ -40,18 +34,11 @@ export const TRAIN_CAP_MS = 15 * 60_000;
 /** How long training stays stopped after hitting the cap. */
 export const TRAIN_COOLDOWN_MS = 5 * 60_000;
 
-/** Where the clock lives. Beside the other flag files, on home. */
-const STATE_FILE = "training_cap.txt";
+/** When the current stretch of training began, or 0 when none is running. */
+let startedAt = 0;
 
-/** A stretch of training in progress. */
-interface TrainingClock {
-    /** When the current stretch began, in ms since epoch. */
-    readonly startedAt: number;
-    /** When the last cap was hit, or 0 if it has not been. */
-    readonly cappedAt: number;
-}
-
-const NO_CLOCK: TrainingClock = { startedAt: 0, cappedAt: 0 };
+/** When the last cap was hit, or 0 if it has not been. */
+let cappedAt = 0;
 
 /**
  * Whether the cap governs this action kind.
@@ -67,73 +54,34 @@ export function capApplies(kind: string): boolean {
 /**
  * What the clock says to do right now.
  *
- *   start   no stretch in progress; the caller should record one
+ *   start   no stretch in progress; one is begun
  *   allow   a stretch is running and under the cap
  *   capped  the cap was hit and the cooldown has not elapsed
  *
  * Returned rather than a bare boolean because "not allowed" has two meanings that read
  * differently in the log — "you have been at this long enough" and "you are cooling down"
  * — and collapsing them would make the reason unreadable.
+ *
+ * Advancing the clock here rather than in a separate "now do it" call, because the state
+ * it updates IS the decision: starting a stretch, ending one at the cap, or leaving a
+ * running one alone. Two calls could disagree.
  */
 export type CapVerdict = "start" | "allow" | "capped";
 
-/** Read the clock, or the empty one when there is nothing usable on disk. */
-function readClock(ns: NS): TrainingClock {
-    try {
-        if (!ns.fileExists(STATE_FILE, "home")) return NO_CLOCK;
-        const [startedAt, cappedAt] = ns.read(STATE_FILE).trim().split(",").map(Number);
-        // A malformed or half-written file reads as "nothing recorded" rather than as a
-        // clock starting at NaN, which would compare false against everything and let
-        // training run unbounded — the exact failure this module prevents.
-        if (!Number.isFinite(startedAt) || !Number.isFinite(cappedAt)) return NO_CLOCK;
-        return { startedAt, cappedAt };
-    } catch {
-        return NO_CLOCK;
-    }
-}
+export function trainCapVerdict(now: number = Date.now()): CapVerdict {
+    // Cooling down: the cap was hit and the cooldown has not elapsed. Nothing is recorded
+    // as started, so the next stretch begins cleanly once it expires.
+    if (cappedAt > 0 && now - cappedAt < TRAIN_COOLDOWN_MS) return "capped";
 
-function writeClock(ns: NS, clock: TrainingClock): void {
-    try {
-        ns.write(STATE_FILE, `${clock.startedAt},${clock.cappedAt}`, "w");
-    } catch {
-        // A clock that cannot be written is a run with no cap, not a crash. The caller
-        // still gets an answer; it simply cannot be trusted to persist.
-    }
-}
-
-/**
- * What to do about training right now, and record the decision.
- *
- * WRITES ON EVERY CALL, because the state it writes IS the decision: starting a stretch,
- * ending one at the cap, or leaving a running one alone. A read-only version would have
- * to be paired with a separate "now do it" call, and the two could disagree.
- *
- * The clock is anchored to the first tick of training, not to a stat value, so a run that
- * switches from str to def mid-stretch keeps one budget rather than restarting it — the
- * thing being limited is the run's patience, not any one measurement.
- */
-export function trainCapVerdict(ns: NS, now: number = Date.now()): CapVerdict {
-    const clock = readClock(ns);
-
-    // Cooling down: the cap was hit, and the cooldown has not elapsed. Nothing is
-    // recorded as started, so the next stretch begins cleanly once it expires.
-    if (clock.cappedAt > 0 && now - clock.cappedAt < TRAIN_COOLDOWN_MS) {
-        return "capped";
-    }
-
-    // No stretch, or the stored one is from a previous session. `startedAt` after `now`
-    // is impossible from a real clock and means the file is stale — a reset in time, a
-    // different run — so it is discarded rather than trusted.
-    if (clock.startedAt <= 0 || clock.startedAt > now) {
-        writeClock(ns, { startedAt: now, cappedAt: 0 });
+    if (startedAt <= 0) {
+        startedAt = now;
         return "start";
     }
 
-    // A stretch that has been running since before the last cap is also stale: the cap
-    // clears `startedAt`, so finding one still set means the file predates that write.
-    if (now - clock.startedAt < TRAIN_CAP_MS) return "allow";
+    if (now - startedAt < TRAIN_CAP_MS) return "allow";
 
-    writeClock(ns, { startedAt: 0, cappedAt: now });
+    startedAt = 0;
+    cappedAt = now;
     return "capped";
 }
 
@@ -141,13 +89,17 @@ export function trainCapVerdict(ns: NS, now: number = Date.now()): CapVerdict {
  * Forget the clock, as when training stops for a reason other than the cap.
  *
  * The cap is the run's patience with TRAINING. When the run stops training for its own
- * reasons — the target was reached, the goal moved on — that patience is not being
- * spent, and carrying a half-used budget into the next stretch would cap the second one
- * early. Called by the caller when whatever it is doing is not training.
+ * reasons — the target was reached, the goal moved on — that patience is not being spent,
+ * and carrying a half-used budget into the next stretch would cap the second one early.
+ * Called by the caller when what it chose is not training.
  */
-export function clearTrainingClock(ns: NS): void {
-    writeClock(ns, NO_CLOCK);
+export function clearTrainingClock(): void {
+    startedAt = 0;
+    cappedAt = 0;
 }
 
-/** For tests: the file the clock lives in. */
-export const TRAINING_CAP_FILE = STATE_FILE;
+/** Forget everything. Exported for tests, like the other features' resets. */
+export function reset(): void {
+    startedAt = 0;
+    cappedAt = 0;
+}
