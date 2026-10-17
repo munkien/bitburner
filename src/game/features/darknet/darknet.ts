@@ -4,7 +4,7 @@ import type { Context } from "../../lib/context.ts";
 import { ChangeLog, announce, publishStatus } from "../../lib/log.ts";
 import { subGoalsFor } from "../../lib/objective.ts";
 import { drainReports, type WormReport } from "./darknet-reports.ts";
-import { findScriptOnHome } from "../../lib/scripts.ts";
+import { basename, findScriptOnHome } from "../../lib/scripts.ts";
 import {
     ENTRY,
     deepestDepth,
@@ -68,6 +68,26 @@ import {
 
 /** Where the worker script lives, resolved at runtime because sync may nest it. */
 const WORM_NAME = "worm.ts";
+
+/**
+ * The files `worm.ts` imports, relative to this feature, as it will find them on the
+ * target host.
+ *
+ * A worker cannot run without them: Bitburner refuses a script whose imports do not
+ * resolve, and does so SILENTLY — `exec` returns a pid, the script dies immediately, and
+ * `top` on the host shows nothing. That is why they are listed here and copied alongside
+ * the worker rather than assumed to be present.
+ *
+ * Paths are from `src/game`, so `features/darknet/darknet-reports.ts` lands on the host
+ * at the same relative position `../darknet-reports.ts` names from `features/darknet/
+ * scripts/`. Kept in step with the imports in `scripts/worm.ts` by hand; there are three
+ * of them and a worker that gains a fourth needs it added here.
+ */
+const WORM_DEPENDENCIES = [
+    "features/darknet/darknet-reports.ts",
+    "features/darknet/darknet-money.ts",
+    "lib/scripts.ts",
+] as const;
 
 /**
  * The server this Master runs on.
@@ -693,6 +713,26 @@ function deploy(ns: NS, context: Context): void {
         try {
             if (ns.scriptRunning(worm, host)) continue;
             if (!ns.fileExists(worm, host)) ns.scp(worm, host, "home");
+
+            // THE WORKER'S IMPORTS HAVE TO TRAVEL WITH IT.
+            //
+            // `worm.ts` imports `../darknet-reports.ts`, `../darknet-money.ts` and
+            // `../../../lib/scripts.ts`. Bitburner refuses to run a script whose imports
+            // do not resolve — no exception, no log line — so copying only `worm.ts`
+            // meant `exec` returned a pid, the worker died on its first instruction, and
+            // `top` on the host showed NOTHING running. Measured exactly that: no
+            // refusal warning (so `exec` succeeded) and an empty process list.
+            //
+            // Paths are preserved, so the relative imports resolve on the target exactly
+            // as they do on home.
+            for (const dependency of WORM_DEPENDENCIES) {
+                const source = findScriptOnHome(ns, basename(dependency));
+                if (source === null) continue;
+                const target = `/${dependency}`;
+                if (ns.fileExists(target, host)) continue;
+                ns.scp(source, host, "home");
+            }
+
             // One thread is correct here: a worker only probes and deploys, and the
             // authentication it reports on is the Master's job. Threads would scale
             // nothing this script does.
