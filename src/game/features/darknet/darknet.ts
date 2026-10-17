@@ -1,7 +1,7 @@
 import type { NS } from "@ns";
 
 import type { Context } from "../../lib/context.ts";
-import { ChangeLog, announce } from "../../lib/log.ts";
+import { ChangeLog, announce, publishStatus } from "../../lib/log.ts";
 import { subGoalsFor } from "../../lib/objective.ts";
 import { drainReports, type WormReport } from "./darknet-reports.ts";
 import { findScriptOnHome } from "../../lib/scripts.ts";
@@ -130,6 +130,20 @@ let warnedNoWorm = false;
 let diagnosed = false;
 
 /**
+ * The one-line status the dashboard shows, or "" before the first tick.
+ *
+ * PUBLISHED, not merely logged. Every other feature writes to the change log, which only
+ * reaches the in-game panel; `publishStatus` is what carries a line to the console and
+ * telemetry. Dark Net had no entry at all, so on a live run it loaded, held 6GB and
+ * reported NOTHING observable — indistinguishable from a feature that never ran.
+ *
+ * The value is the changing part (depth, known hosts, sessions, attempts), for the reason
+ * the change-log line above documents: a constant string is written once and then
+ * suppressed, so a walk climbing from depth 0 to 9 would look identical to one stopped.
+ */
+let status = "";
+
+/**
  * What the Dark Net has earned this run.
  *
  * Money is not tracked, because the game's own balance already reports it. These two
@@ -171,6 +185,9 @@ export function sessioned(): readonly string[] {
 export function tick(ns: NS, context: Context): void {
     log ??= new ChangeLog(ns, "DNET");
     log.updateNs(ns);
+    // Registered once; the getter reads the CURRENT value, so the line tracks the walk
+    // rather than whatever it said at registration.
+    publishStatus("darknet", () => status || "starting");
 
     // Once per process, say what the game actually reports.
     //
@@ -208,6 +225,7 @@ export function tick(ns: NS, context: Context): void {
         // Not a fault: the net moves, and `darkweb` may simply not be adjacent to
         // home right now. A Situation rather than a Requirement, which is why the
         // feature stays loaded and reports rather than unloading itself.
+        status = "unreachable (darkweb is not visible from home)";
         log.change("status", "Status", "unreachable", "darkweb is not visible from home");
         return;
     }
@@ -239,6 +257,10 @@ export function tick(ns: NS, context: Context): void {
     //
     // The depth and the count are what a reader watches, so they are the value.
     const depth = deepestDepth(map);
+    // The SAME line reaches the console as the panel. `status` is what `publishStatus`
+    // carries; keeping the two in step means the dashboard cannot say something the log
+    // does not, which is how a feature ends up reporting two different truths.
+    status = `depth=${depth} known=${map.size} sessions=${sessions.size} attempts=${inFlight.size}`;
     log.change(
         "status", "Status",
         // `attempts` is part of the value, not the detail, for the same reason the depth
@@ -246,7 +268,7 @@ export function tick(ns: NS, context: Context): void {
         // and a wrong password used to produce no output at all. Without a changing
         // number here, "working through a password list" and "stuck" look identical for
         // as long as it takes to exhaust the candidates.
-        `depth=${depth} known=${map.size} sessions=${sessions.size} attempts=${inFlight.size}`,
+        status,
         `caches=${cachesOpened} karma=${karmaSpent}`,
     );
 }
@@ -447,6 +469,7 @@ type OpenOutcome = "opened" | "pending" | "failed";
 function reportBlocked(ns: NS, charisma: number): void {
     const candidates = [...map.values()].filter(node => node.online && !node.session);
     if (candidates.length === 0) {
+        status = `blocked: no targets (${map.size} known, all offline or open)`;
         log?.change("blocked", "Blocked", "no targets", "every known server is offline or already open");
         return;
     }
@@ -456,6 +479,7 @@ function reportBlocked(ns: NS, charisma: number): void {
         Infinity,
     );
     if (Number.isFinite(lowest) && lowest > charisma) {
+        status = `blocked: needs charisma ${lowest}, have ${charisma}`;
         log?.change("blocked", "Blocked", "charisma", `nearest needs ${lowest}, have ${charisma}`);
         return;
     }
