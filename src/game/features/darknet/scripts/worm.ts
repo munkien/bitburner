@@ -124,10 +124,15 @@ export async function main(ns: NS): Promise<void> {
     // re-deploys itself to the places it just found, and the frontier advances one hop
     // per generation. The Master still owns the sessions and the map; this only extends
     // the reach.
-    const { started: spread, problem: spreadProblem } = await spreadOnward(
+    const { started: spread, refused, problem: spreadProblem } = await spreadOnward(
         ns, host, reachable, wantKarma, wantCharisma,
     );
     if (spreadProblem !== undefined) note("spread", spreadProblem);
+    // A refusal is the normal case on a first pass — the Master opens neighbours one at a
+    // time — so it is reported as a count rather than as a problem, but it IS reported:
+    // `spread=0` with six neighbours and no explanation was indistinguishable from a
+    // worker that never tried.
+    if (refused.length > 0) note("spread", `exec refused on ${refused.length}: ${refused.join(", ")}`);
 
     const report: WormReport = { from: host, reachable, depth, opened, karmaLost, spread, problems };
     sendReport(ns, report);
@@ -163,14 +168,16 @@ async function spreadOnward(
     neighbours: readonly string[],
     wantKarma: boolean,
     wantCharisma: boolean,
-): Promise<{ started: string[]; problem?: string }> {
+): Promise<{ started: string[]; refused: string[]; problem?: string }> {
     const started: string[] = [];
-    /** The first neighbour that refused, if any. */
+    /** Neighbours whose `exec` returned 0 — refused, not failed. */
+    const refused: string[] = [];
+    /** The first neighbour that threw, if any. */
     let problem: string | undefined;
     const self = findScriptOnHome(ns, WORM_NAME);
     // Reported rather than returning bare: without the script a worker cannot spread, so
     // the walk stops at this depth, and that is invisible from the Master.
-    if (self === null) return { started, problem: `${WORM_NAME} not found from ${host}` };
+    if (self === null) return { started, refused, problem: `${WORM_NAME} not found from ${host}` };
 
     for (const neighbour of neighbours) {
         // Back towards home would be a wasted deployment, and `home` is not a darknet
@@ -182,8 +189,21 @@ async function spreadOnward(
             // Copy from HERE, which is a legal `scp` source because "scp() *from* the
             // server is always allowed". Home could not reach it.
             if (!ns.fileExists(self, neighbour)) await ns.scp(self, neighbour, host);
-            if (ns.exec(self, neighbour, 1, neighbour, wantKarma, wantCharisma) > 0) {
+
+            // `exec` RETURNS 0 when it refuses — it does not throw — so the catch below
+            // never fires for the ordinary case of a neighbour this worker has no session
+            // on. Measured: `spread=0` with six neighbours found and no problem recorded
+            // at all, because nothing looked at the return value.
+            //
+            // A refusal is the normal state here, not an error: the Master owns the
+            // sessions and opens the neighbours one at a time, so most of a worker's
+            // neighbours will refuse on the first pass. Recorded once per neighbour so
+            // the reason is available without turning a routine refusal into noise.
+            const pid = ns.exec(self, neighbour, 1, neighbour, wantKarma, wantCharisma);
+            if (pid > 0) {
                 started.push(neighbour);
+            } else {
+                refused.push(neighbour);
             }
         } catch (error) {
             // No session yet, or the neighbour moved. The Master will try again once it
@@ -194,7 +214,7 @@ async function spreadOnward(
         }
     }
 
-    return { started, problem };
+    return { started, refused, problem };
 }
 
 /**
