@@ -105,6 +105,16 @@ const QUEUE_DISPLAY_LIMIT = 10;
 const BUILD_STAMP = "build.txt";
 
 /**
+ * Where the orchestrator writes the reason it stopped, if it stopped at all.
+ *
+ * Written by an `atExit` callback, which the game runs when the script dies for ANY
+ * reason — a return, a throw, a killall, a spawn, out of RAM. A normal stop of the
+ * framework writes "stopped"; anything else — the case that has been chased for six
+ * rounds — leaves the real cause on disk where the next run (or a human) can read it.
+ */
+const EXIT_REASON_FILE = "nexus_exit_reason.txt";
+
+/**
  * The largest failure count that still looks like a transient fault. A feature
  * that is simply not deployed is handled per-feature and does not count here.
  */
@@ -113,6 +123,25 @@ const MAX_CONSECUTIVE_FAILURES = 3;
 export async function main(ns: NS): Promise<void> {
     ns.disableLog("ALL");
     ns.ui.openTail();
+
+    // THE EXIT TRAP, registered before anything else can die.
+    //
+    // The orchestrator has been exiting silently, with no ERROR line and no return path
+    // that explains it. This callback runs on ANY death and writes where it was, so the
+    // next boot can name the killer instead of the symptoms being re-diagnosed from a
+    // recording that ends mid-pass.
+    //
+    // `reason` is cleared at the start of a pass and set on every ordinary exit path, so
+    // the file only says something UNEXPECTED when the script died somewhere that never
+    // had a chance to write a reason.
+    let exitReason = "unknown (died before the loop wrote a reason)";
+    ns.atExit(() => {
+        try {
+            ns.write(EXIT_REASON_FILE, `${exitReason}\n`, "w");
+        } catch {
+            // Even the cleanup can fail (e.g. out of RAM). Nothing more to do.
+        }
+    });
     // To the Terminal rather than the log panel: the first pass clears the panel,
     // so a startup line printed there would be gone before it could be read.
     ns.tprint("INFO: starting orchestrator");
@@ -172,6 +201,12 @@ export async function main(ns: NS): Promise<void> {
     let nudge: Command | null = null;
 
     while (true) {
+        // Clear the trap every pass. If the process dies mid-pass, the atExit hook
+        // writes whatever happened to be there — so an ordinary stop records its reason,
+        // while a death the loop never saw still reads "unknown" and points at a crash
+        // rather than at a decision.
+        exitReason = "unknown (never wrote the exit reason this pass)";
+
         // A pass may fail, and a pass that fails must not take the framework with
         // it. Everything that runs on a timer is fallible: the capability probes
         // call the game, and the runtime imports modules and awaits feature
@@ -309,6 +344,7 @@ export async function main(ns: NS): Promise<void> {
                             `ERROR: orchestrator stopping after ${MAX_CONSECUTIVE_FAILURES} failed passes; ` +
                             `last failure: ${describeError(outcome.error)}`,
                         );
+            exitReason = "3 failed passes: " + describeError(outcome.error);
                         return;
                     }
                 } else {
@@ -349,6 +385,7 @@ export async function main(ns: NS): Promise<void> {
                     `ERROR: orchestrator stopping after ${MAX_CONSECUTIVE_FAILURES} failed passes; ` +
                     `last failure: ${describeError(error)}`,
                 );
+            exitReason = "3 failed passes (snapshot): " + describeError(error);
                 return;
             }
         }
