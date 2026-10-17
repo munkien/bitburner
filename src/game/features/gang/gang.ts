@@ -388,7 +388,9 @@ export function tick(ns: NS, context: Context): void {
     // Re-derived every tick from the gang's own state, because the thresholds
     // that matter move as it grows: the respect phase ends when the gang's next
     // recruit stops being worth chasing, which is a function of its size.
-    config = deriveGangConfig(g, members, enemies.enemyCount);
+    // `canRecruitMember` rather than a member count: the game decides, and its answer already
+    // accounts for respect. While it is true the gang overrides the money floor and grows.
+    config = deriveGangConfig(g, members, enemies.enemyCount, ns.gang.canRecruitMember());
 
     // The money floor is the run's wealth goal, not a gang constant. Below it the gang
     // earns and does nothing else, which is the same question the wealth goal asks, so

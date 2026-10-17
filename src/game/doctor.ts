@@ -263,7 +263,9 @@ export function main(ns: NS): void {
         const enemyCount = Object.entries(ns.gang.getAllGangInformation())
             .filter(([name, other]) => name !== info.faction && other.territory > 0)
             .length;
-        const derived = deriveGangConfig(info, members, enemyCount);
+        // The doctor reports on a gang it is not driving, so it asks the game the same
+        // question the feature does rather than assuming growth is over.
+        const derived = deriveGangConfig(info, members, enemyCount, ns.gang.canRecruitMember());
 
         line(ns, "type", info.isHacking ? "hacking" : "combat");
         line(ns, "members", `${members.length}, facing ${enemyCount} rival(s)`);

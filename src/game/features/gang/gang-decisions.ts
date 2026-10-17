@@ -96,6 +96,23 @@ export interface GangConfig {
     wantedPenaltyTarget: number;
     respectPhaseEnd: number;
     /**
+     * Whether the gang is still GROWING, which outranks the money rule.
+     *
+     * Respect gates `canRecruitMember`, so a gang that stops earning respect stops
+     * growing, and a small gang earns less for the rest of the run. That makes growth
+     * the one thing worth doing while poor: the money floor exists because a poor run
+     * cannot afford a war, but a gang that never grows never becomes worth having.
+     *
+     * While this is true BOTH `decideMode` and `decideWarfare` ignore `moneyFloor`. They
+     * must be told the same thing — this module documents at `decideWarfare` that the two
+     * disagreeing sends members to earn in the mode machine while fighting in the field —
+     * so the flag is set in one place and read by both, never derived separately.
+     *
+     * Cleared once the gang cannot recruit again, at which point the ordinary money and
+     * respect rules resume and the gang's output is spent on the run instead of on itself.
+     */
+    recruitingPhase: boolean;
+    /**
      * Player net worth below which the gang earns money and nothing else.
      *
      * NET WORTH, not home cash, and the difference is not cosmetic. Cash is only what is
@@ -210,6 +227,9 @@ export const GANG_CONFIG_DEFAULT: GangConfig = {
     wantedPenaltyTarget: 0.90,
     respectPhaseEnd: 25e6,
     moneyFloor: 25e9,
+    // Derived per tick by `deriveGangConfig`; false here so the default reads as an
+    // ordinary grown gang rather than one that overrides the money rule.
+    recruitingPhase: false,
     respectMoneyShare: 0.25,
     territoryEnableBelow: 0.90,
     territoryDisableAbove: 0.999995,
@@ -390,7 +410,10 @@ export function decideMode(
         return { mode: "TERRITORY", reason: "engaged" };
     }
 
-    if (netWorth < c.moneyFloor * MONEY_PANIC_FRACTION) {
+    // RECRUITING OUTRANKS POVERTY. Respect gates recruitment, so a gang that stops
+    // earning it stops growing — and a small gang earns less for the rest of the run.
+    // See `recruitingPhase` for why this is read here AND in `decideWarfare`.
+    if (!c.recruitingPhase && netWorth < c.moneyFloor * MONEY_PANIC_FRACTION) {
         return { mode: "MONEY", reason: "below-money-floor" };
     }
 
@@ -411,10 +434,14 @@ export function decideMode(
     // it does — held the mode on WANTED indefinitely and the gang never worked for money
     // at all. `MONEY_PANIC_FRACTION` is where "there is an income to defend" stops being
     // true.
-    if (netWorth < c.moneyFloor) {
-        // Between the panic gate and the floor: cleanup still wins if it is real cleanup
-        // (the level can move and is off target), because at this wealth the gang is
-        // earning something and the penalty is worth defending.
+    // Between the panic gate and the floor: cleanup still wins if it is real cleanup
+    // (the level can move and is off target), because at this wealth the gang is
+    // earning something and the penalty is worth defending.
+    //
+    // The RECRUITING override applies here too, not only at the panic gate above: this is
+    // the check that actually fires for a run between the two thresholds, and guarding
+    // only the panic gate left a growing gang told to earn money anyway.
+    if (!c.recruitingPhase && netWorth < c.moneyFloor) {
         if (wantedNeedsAttention(g, c, wantedEngaged)) {
             return { mode: "WANTED", reason: "wanted-cleanup" };
         }
@@ -992,7 +1019,10 @@ export function decideWarfare(
     // territory permanently raises the gang's income, so a fight the gang would win is
     // worth taking while poor. Both sides ask `winnableWar`, so the agreement above is
     // preserved rather than merely restated.
-    if (netWorth < c.moneyFloor && !winnableWar(g, c, enemies)) {
+    // The same override as `decideMode`: while the gang is still growing, the floor does
+    // not stop it fighting. The two decisions must agree, which is why both read the flag
+    // rather than one deriving the exception for itself.
+    if (!c.recruitingPhase && netWorth < c.moneyFloor && !winnableWar(g, c, enemies)) {
         return g.territoryWarfareEngaged
             ? { action: "DISENGAGE", reason: "below-money-floor" }
             : { action: "HOLD", reason: "below-money-floor" };

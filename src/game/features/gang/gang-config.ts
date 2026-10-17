@@ -72,12 +72,18 @@ export function deriveGangConfig(
     g: GangGenInfo,
     members: readonly GangMemberInfo[],
     enemyCount: number,
+    /** Whether the gang can still take on another member. */
+    canRecruit: boolean,
 ): GangConfig {
     const base = GANG_CONFIG_DEFAULT;
     const recruiting = members.length > 0;
 
     return {
         ...base,
+        // Growth outranks the money rule: see `recruitingPhase`. A gang with an open
+        // recruit slot is worth growing whatever the player is worth, because respect
+        // gates recruitment and a small gang earns less for the rest of the run.
+        recruitingPhase: recruiting && canRecruit,
         respectPhaseEnd: respectPhaseEnd(g),
         territoryEnableBelow: territoryEnableBelow(enemyCount),
         // A gang still growing should not spend its trainer slots on members that
