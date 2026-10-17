@@ -6,7 +6,7 @@ import { findScriptOnHome } from "../../lib/scripts.ts";
 // re-exports is not something it can follow — that is what produced "Progression is deployed
 // but would not compile".
 import { REACH_SEC, floorEtaSeconds, floorReachable } from "../../lib/training-budget.ts";
-import { TRAIN_CAP_MS, TRAIN_COOLDOWN_MS, capApplies, clearTrainingClock, trainCapVerdict } from "../../lib/training-cap.ts";
+import { TRAIN_CAP_MS, TRAIN_COOLDOWN_MS, capApplies, noteTraining, releaseIfTrainingStopped, trainCapVerdict } from "../../lib/training-cap.ts";
 import { observe, rateFor, type MeasuredStat, type OpenSample, type RateSample } from "../../lib/rate-tracker.ts";
 import {
     belowFloor,
@@ -413,11 +413,39 @@ export function tick(ns: NS, context: Context): void {
         return;
     }
 
-    // The training cap measures the run's PATIENCE with training, not any one action. When
-    // the chosen action is not training, that patience is not being spent, so the budget is
-    // released — otherwise a run that trained for fourteen minutes, went and did faction
-    // work, and came back would be capped one minute into the second stretch.
-    if (!capApplies(chosen.kind)) clearTrainingClock();
+    // The training cap measures the run's PATIENCE with training, not any one action.
+    //
+    // Releasing it whenever the run chose something else was too eager and defeated the
+    // cap: backdoors, the cash floor, travel and augment purchases all sit AHEAD of
+    // training in the chain, so a mostly-training run takes a non-training action every so
+    // often — and each one reset fourteen minutes of patience. Measured consequence: four
+    // hours of training with the fifteen-minute cap never firing.
+    //
+    // Patience is now ended by ABSENCE. A sighting within `TRAIN_INTERRUPTION_MS` of the
+    // last one continues the same stretch; a longer gap starts a fresh one.
+    if (capApplies(chosen.kind)) {
+        noteTraining();
+        if (trainCapVerdict() === "capped") {
+            // THE CAP IS APPLIED HERE, AT THE ONE PLACE EVERY ACTION PASSES THROUGH.
+            //
+            // It used to live inside `statFloor`, which is only ONE of five places that
+            // produce gym or university actions — the others being `factionTraining`,
+            // `trainForGangFaction`, and the idle fallback that trains "something" when no
+            // goal is reachable. A run that stopped reaching the goal model went to the
+            // fallback and trained for hours with the cap never consulted.
+            //
+            // Refusing here covers every producer without each of them having to remember.
+            const stalled = `training capped after ${formatEta(TRAIN_CAP_MS / 1000)} — ` +
+                `cooling down for ${formatEta(TRAIN_COOLDOWN_MS / 1000)} before it can start again`;
+            log?.change("training-cap", "Training", "paused", stalled);
+            reason = stalled;
+            return;
+        }
+    } else {
+        // Not training this tick. End the stretch only if the absence is real; a single
+        // backdoor between two gym sessions must not reset the budget.
+        releaseIfTrainingStopped();
+    }
 
     // ONE ACTION PER TICK, and travel is an action.
     //
@@ -1091,23 +1119,11 @@ function statFloor(ns: NS, player: Player, goal: Goal | null): PlayerAction | nu
         return null;
     }
 
-    // A hard wall-clock cap, separate from the reachability budget above.
-    //
-    // The budget can refuse nothing when the rate is unknown — `floorReachable` treats a
-    // null or infinite rate as "keep going", because refusing on no evidence would stop a
-    // fresh run from ever training. That leaves a stat the rate model cannot see being
-    // trained indefinitely, which is the reported complaint. A clock does not care whether
-    // the target is reachable: after `TRAIN_CAP_MS` the run stops regardless, and
-    // `TRAIN_COOLDOWN_MS` must pass before it can start again.
-    const cap = trainCapVerdict();
-    if (cap === "capped") {
-        log?.change(
-            "training-cap", "Training", "paused",
-            `gym/course training capped after ${formatEta(TRAIN_CAP_MS / 1000)} — ` +
-            `cooling down for ${formatEta(TRAIN_COOLDOWN_MS / 1000)} before it can start again`,
-        );
-        return null;
-    }
+    // The cap is applied in `tick`, at the point every action passes through, rather
+    // than here. This function is only ONE of five producers of gym/university actions —
+    // `factionTraining`, `trainForGangFaction` and the idle fallback all bypass it — so a
+    // check here left the other four free to train indefinitely. That was the reported
+    // four-hour stretch.
 
     if (under.kind === "hacking") {
         return { kind: "UNI", university: UNIVERSITY, course: UNI_HACKING, city: "Sector-12" };

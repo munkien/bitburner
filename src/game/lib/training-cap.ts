@@ -41,6 +41,22 @@ let startedAt = 0;
 let cappedAt = 0;
 
 /**
+ * When training was last seen, so a brief interruption does not reset the budget.
+ *
+ * WHY THIS EXISTS. Releasing the clock whenever the run chose something other than
+ * training was too eager, and it defeated the cap entirely. The priority chain puts
+ * backdoors, the cash floor, travel and augment purchases AHEAD of training, so a run
+ * that is mostly training still takes a non-training action every so often — and each one
+ * reset fourteen minutes of patience. Measured consequence: a run trained for four hours
+ * without the fifteen-minute cap ever firing.
+ *
+ * Patience is now ended by ABSENCE, not by a single tick. Training seen within
+ * `TRAIN_INTERRUPTION_MS` of the last sighting continues the same stretch; a longer gap
+ * ends it and the next stretch starts fresh.
+ */
+let lastTrainedAt = 0;
+
+/**
  * Whether the cap governs this action kind.
  *
  * Gym and university only. Everything else is productive work whose interruption would
@@ -102,4 +118,40 @@ export function clearTrainingClock(): void {
 export function reset(): void {
     startedAt = 0;
     cappedAt = 0;
+}
+
+/**
+ * How long a gap between training ticks still counts as the same stretch.
+ *
+ * Two minutes is longer than any single non-training action the priority chain interposes
+ * between gym sessions (a backdoor, a donation, an augmentation purchase — all sub-second
+ * decisions), and far shorter than the fifteen-minute budget, so a run that genuinely
+ * stops training still releases its patience promptly.
+ */
+export const TRAIN_INTERRUPTION_MS = 2 * 60_000;
+
+/**
+ * Note that training is happening right now, continuing the current stretch.
+ *
+ * Separate from `trainCapVerdict` because the two answer different questions: this one
+ * records a sighting, that one decides whether the budget allows another. Keeping them
+ * apart means the interruption window is applied in ONE place rather than being rebuilt
+ * at every call site.
+ */
+export function noteTraining(now: number = Date.now()): void {
+    lastTrainedAt = now;
+}
+
+/**
+ * Release the budget only if training has genuinely stopped.
+ *
+ * The caller reports "the chosen action is not training" every tick it is not, which is
+ * most ticks for a run doing faction work. Only an ABSENCE longer than
+ * `TRAIN_INTERRUPTION_MS` ends the stretch — see `lastTrainedAt` for why.
+ */
+export function releaseIfTrainingStopped(now: number = Date.now()): void {
+    if (lastTrainedAt === 0) return;
+    if (now - lastTrainedAt < TRAIN_INTERRUPTION_MS) return;
+    startedAt = 0;
+    lastTrainedAt = 0;
 }

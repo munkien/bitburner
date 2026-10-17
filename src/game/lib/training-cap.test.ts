@@ -20,7 +20,10 @@ import { test } from "node:test";
 import {
     TRAIN_CAP_MS,
     TRAIN_COOLDOWN_MS,
+    TRAIN_INTERRUPTION_MS,
     capApplies,
+    noteTraining,
+    releaseIfTrainingStopped,
     clearTrainingClock,
     reset,
     trainCapVerdict,
@@ -98,4 +101,42 @@ test("the clock covers a stretch, not one stat", () => {
     assert.equal(trainCapVerdict(t0 + 600_000), "allow");
     // Ten minutes later the stretch is still the same one, and still ends at the cap.
     assert.equal(trainCapVerdict(t0 + TRAIN_CAP_MS), "capped");
+});
+
+test("a brief interruption does NOT reset the training budget", () => {
+    // THE BUG THE CAP HAD. Backdoors, the cash floor and travel all sit AHEAD of training
+    // in the priority chain, so a mostly-training run takes a non-training action every so
+    // often. Releasing the budget on each of those reset fourteen minutes of patience, and
+    // a run trained for four hours with the cap never firing.
+    reset();
+    const t0 = 6_000_000;
+    noteTraining(t0);
+    // The first verdict STARTS the stretch, and it starts it at the time it is called —
+    // so it must be called at t0 for the arithmetic below to mean anything.
+    assert.equal(trainCapVerdict(t0), "start");
+
+    // Ten minutes in, a SHORT interruption: one backdoor, under two minutes. The stretch
+    // must continue rather than reset.
+    //
+    // `noteTraining` is called on every training tick in the real run, so the "last
+    // trained" stamp is the interruption's START, not the last time the test happened to
+    // mention it.
+    noteTraining(t0 + 600_000);
+    assert.equal(trainCapVerdict(t0 + 600_000), "allow");
+    releaseIfTrainingStopped(t0 + 630_000);
+    noteTraining(t0 + 630_000);
+
+    // At fifteen minutes the cap still fires, interruption and all.
+    assert.equal(trainCapVerdict(t0 + TRAIN_CAP_MS), "capped");
+});
+
+test("a genuine stop releases the budget after the interruption window", () => {
+    reset();
+    const t0 = 7_000_000;
+    noteTraining(t0);
+    trainCapVerdict(t0);
+
+    // No training for longer than the window: the stretch is over.
+    releaseIfTrainingStopped(t0 + TRAIN_INTERRUPTION_MS);
+    assert.equal(trainCapVerdict(t0 + TRAIN_INTERRUPTION_MS + 1), "start");
 });

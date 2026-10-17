@@ -100,35 +100,35 @@ export const FEATURES: readonly FeatureMeta[] = [
         // goal measurement.
         movable: ["combat"],
     },
-    {
-        id: "darknet",
-        name: "Dark Net",
-        path: "./features/darknet/darknet.ts",
-        // After Bladeburner and before gang: it neither feeds progression nor
-        // contends for the activity slot, so it sits wherever its home RAM cost is
-        // least likely to displace a feature that does.
-        priority: 555,
-        // Five seconds, not the thirty this started at.
-        //
-        // The walk advances ONE HOP PER TICK, and each hop needs a tick to authenticate
-        // and another for the worker round trip to come back — so a 30s interval put
-        // three minutes between the feature loading and its second hop. Meanwhile its
-        // status line is deduplicated, so between hops it printed nothing at all: the
-        // dashboard showed a Dark Net row that never changed, which reads as a feature
-        // doing nothing.
-        //
-        // The cost is low. Two calls per tick on home (`probe`, `getServerDetails`) plus
-        // whatever the Master decides, and the expensive work happens on the workers.
-        // This was originally justified by a `nextMutation` subscription the feature
-        // never actually made; see the note in `darknet.ts`.
-        intervalMs: 5 * SECOND,
-        // `DarkscapeNavigator.exe` on home. The Dark Net is reachable on any node
-        // once the program is bought, so this is a probe rather than a Source File.
-        requires: ["darknet"],
-        // Phishing and caches pay money and raise karma (the kills side) and charisma,
-        // which is why the feature reads the karma and cha goals to decide what to open.
-        movable: ["money", "karma", "cha"],
-    },
+    // {
+    //     id: "darknet",
+    //     name: "Dark Net",
+    //     path: "./features/darknet/darknet.ts",
+    //     // After Bladeburner and before gang: it neither feeds progression nor
+    //     // contends for the activity slot, so it sits wherever its home RAM cost is
+    //     // least likely to displace a feature that does.
+    //     priority: 555,
+    //     // Five seconds, not the thirty this started at.
+    //     //
+    //     // The walk advances ONE HOP PER TICK, and each hop needs a tick to authenticate
+    //     // and another for the worker round trip to come back — so a 30s interval put
+    //     // three minutes between the feature loading and its second hop. Meanwhile its
+    //     // status line is deduplicated, so between hops it printed nothing at all: the
+    //     // dashboard showed a Dark Net row that never changed, which reads as a feature
+    //     // doing nothing.
+    //     //
+    //     // The cost is low. Two calls per tick on home (`probe`, `getServerDetails`) plus
+    //     // whatever the Master decides, and the expensive work happens on the workers.
+    //     // This was originally justified by a `nextMutation` subscription the feature
+    //     // never actually made; see the note in `darknet.ts`.
+    //     intervalMs: 5 * SECOND,
+    //     // `DarkscapeNavigator.exe` on home. The Dark Net is reachable on any node
+    //     // once the program is bought, so this is a probe rather than a Source File.
+    //     requires: ["darknet"],
+    //     // Phishing and caches pay money and raise karma (the kills side) and charisma,
+    //     // which is why the feature reads the karma and cha goals to decide what to open.
+    //     movable: ["money", "karma", "cha"],
+    // },
     {
         id: "gang",
         name: "Gang",
