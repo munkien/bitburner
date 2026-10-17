@@ -399,6 +399,48 @@ export function tick(ns: NS, context: Context): void {
             trainingRemaining(player, context.goal),
         )
     ) {
+        // THE TRAINING CAP IS ENFORCED EVEN WHEN YIELDING, and that is the fix for a gym
+        // class that ran for seventeen minutes.
+        //
+        // Yielding means "assign nothing"; it does NOT stop what is already running. So a
+        // class started earlier keeps running in the game's slot while progression returns
+        // here every tick and never reaches the cap below, which sits after this return.
+        // Measured: `progression: yielded ... (training not wanted)` alongside
+        // `work: CLASS agi at Powerhouse Gym`, for as long as the run lasted.
+        //
+        // THERE IS NO API TO CANCEL THE PLAYER'S WORK — no `stopCurrentAction`, and
+        // `stopBladeburnerAction` is Bladeburner's. The only way to take someone out of a
+        // class is to START SOMETHING ELSE, which replaces it. A one-second crime is the
+        // cheapest such action: it touches the slot, costs nothing to speak of, and leaves
+        // the run free to pick its real next action on the following tick.
+        //
+        // Only fires when the budget is spent AND a class is actually running, so a normal
+        // yield is untouched and a non-training activity is never interrupted.
+        const inClass = ((): boolean => {
+            try {
+                return ns.singularity.getCurrentWork()?.type === "CLASS";
+            } catch {
+                return false;
+            }
+        })();
+        if (inClass && trainCapVerdict() === "capped") {
+            const crime = bestCashCrime(ns);
+            // `commitCrime` returns the time it will take, not a success flag; a throw is
+            // the only failure.
+            const stopped = ((): boolean => {
+                try {
+                    ns.singularity.commitCrime(crime, false);
+                    return true;
+                } catch {
+                    return false;
+                }
+            })();
+            reason = stopped
+                ? `yielded: Bladeburner keeps the slot (training capped, released the class)`
+                : `yielded: Bladeburner keeps the slot (training capped, but the class could not be released)`;
+            return;
+        }
+
         reason = `yielded: Bladeburner keeps the slot${
             trainingRemaining(player, context.goal)
                 ? " (chain running)"
