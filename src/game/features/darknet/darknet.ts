@@ -126,6 +126,9 @@ const reported = new Map<string, string[]>();
 
 let log: ChangeLog | null = null;
 let warnedNoWorm = false;
+
+/** Hosts already reported for a refused `exec`, so the warning is once each. */
+const warnedExec = new Set<string>();
 /** Whether the one-shot diagnostic has been printed. */
 let diagnosed = false;
 
@@ -165,6 +168,8 @@ export function reset(): void {
     knownPasswords.clear();
     log = null;
     warnedNoWorm = false;
+    warnedExec.clear();
+    status = "";
     diagnosed = false;
     cachesOpened = 0;
     karmaSpent = 0;
@@ -231,6 +236,22 @@ export function tick(ns: NS, context: Context): void {
     }
 
     const charisma = context.snapshot.player.skills.charisma;
+
+    // THE ENTRY IS SESSIONED HERE, unconditionally and BEFORE the frontier decides
+    // anything.
+    //
+    // Not inside `openRouteTo`, which was the first place this was put and is the wrong
+    // one: that only runs when the frontier HAS a target, and the whole point of the bug
+    // is that it never does. With `known=1` the frontier is empty every pass, so a
+    // session established there would never be established at all.
+    //
+    // `ns.exec` on a darknet host needs a session, and only a script ON a host can see
+    // its neighbours — so without this, no worker runs, nothing is ever discovered, and
+    // the map never leaves size 1. `darkweb` connects with no password, so this is a
+    // plain `connectToSession` with the empty string rather than an attack.
+    if (!sessions.has(ENTRY) && reconnect(ns, ENTRY, "")) {
+        sessions.add(ENTRY);
+    }
 
     const target = frontier(map, charisma, 1)[0];
     if (target === undefined) {
@@ -399,6 +420,12 @@ function openRouteTo(ns: NS, target: DarknetNode, charisma: number): void {
     // Done first, and for the WHOLE chain, because a later hop cannot be reached until
     // the ones before it are re-established. The old per-tick budget applied here too,
     // which meant a five-hop route took five ticks to become current on every pass.
+    //
+    // The ENTRY is sessioned in `tick`, before the frontier is consulted — not here,
+    // because this only runs when the frontier HAS a target and the empty-frontier case
+    // is exactly the one that needed it. See the note there.
+
+
     for (const host of chain) {
         const password = knownPasswords.get(host);
         if (password === undefined) continue;
@@ -649,13 +676,15 @@ function deploy(ns: NS, context: Context): void {
     // Hosts to put a worker on: the gateway, plus every sessioned host adjacent to home.
     //
     // The GATEWAY is the case that was missing, and it is why nothing was ever discovered.
-    // `darkweb` is not a target — it cannot be authenticated, since it has no password —
-    // so it never entered `sessions`, so `deploy` never put a worker on it, so its
-    // neighbours were never reported. The walk could not learn that anything existed
+    // `darkweb` is not a TARGET — it has no password to attack — so the frontier never
+    // offers it, so it never entered `sessions`, so `deploy` never put a worker on it, so
+    // its neighbours were never reported. The walk could not learn that anything existed
     // below the door it was standing at.
     //
-    // It does not need a SESSION to host a worker; it is directly connected to home, which
-    // is what `exec` requires. So it is deployable on the same terms as any adjacent host.
+    // IT DOES NEED A SESSION, and this comment used to claim otherwise. `exec` on a
+    // darknet host requires a session AND a direct connection; a direct connection alone
+    // is not enough. `openRouteTo` now sessioned the entry explicitly with the empty
+    // password, which is what leaves it in `sessions` and lets `exec` succeed here.
     const adjacentToHome = new Set(safeProbe(ns));
     const deployable = new Set<string>([...sessions].filter(host => adjacentToHome.has(host)));
     if (adjacentToHome.has(ENTRY)) deployable.add(ENTRY);
@@ -667,7 +696,23 @@ function deploy(ns: NS, context: Context): void {
             // One thread is correct here: a worker only probes and deploys, and the
             // authentication it reports on is the Master's job. Threads would scale
             // nothing this script does.
-            ns.exec(worm, host, 1, host, karmaMatters, charismaWanted);
+            //
+            // THE RETURN VALUE IS CHECKED, and that is not ceremony. `exec` returns a pid
+            // or 0, and it REFUSES silently: no exception, no log line. This call returned
+            // 0 for an entire run because the host had no session, and because nothing
+            // looked at the result the walk simply never started, reporting only
+            // "sessions=0 known=1" — which read as a discovery problem rather than as a
+            // refused `exec`. Saying so once per host turns that into a diagnosable line.
+            if (ns.exec(worm, host, 1, host, karmaMatters, charismaWanted) === 0) {
+                if (!warnedExec.has(host)) {
+                    warnedExec.add(host);
+                    announce(
+                        ns, "DNET",
+                        `could not start a worker on ${host}: exec refused (no session, or no RAM there)`,
+                        "warn",
+                    );
+                }
+            }
         } catch {
             // The host restarted or went offline between the session and now, which
             // is routine. Dropping the session is the correct response; the map
