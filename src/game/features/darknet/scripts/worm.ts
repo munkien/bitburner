@@ -203,7 +203,11 @@ async function spreadOnward(
             if (pid > 0) {
                 started.push(neighbour);
             } else {
-                refused.push(neighbour);
+                // WHY it refused, not just that it did. `exec` returns 0 for several
+                // unrelated reasons and the difference decides what to do: no session
+                // means the Master must open the host, while no RAM means it cannot be
+                // opened usefully however many times we try. `getBlockedRam` is 0 GB.
+                refused.push(`${neighbour} (${refusalReason(ns, neighbour, self)})`);
             }
         } catch (error) {
             // No session yet, or the neighbour moved. The Master will try again once it
@@ -296,4 +300,29 @@ async function earn(
     }
 
     return { opened, karmaLost, problem };
+}
+
+/**
+ * The most likely reason `exec` refused this neighbour, in a few words.
+ *
+ * `exec` returns 0 and says nothing, so every refusal looks alike from the caller. The
+ * two causes that matter need opposite responses: a missing session is fixed by the
+ * Master opening the host, whereas insufficient RAM is not something a worker can do
+ * anything about — and with no session, `getServerDetails` may itself say nothing useful.
+ *
+ * Diagnostic only: nothing branches on this, and an unreadable host reports as
+ * "unknown" rather than being omitted.
+ */
+function refusalReason(ns: NS, neighbour: string, self: string): string {
+    try {
+        const details = ns.dnet.getServerDetails(neighbour);
+        const blocked = ns.dnet.getBlockedRam(neighbour);
+        const parts: string[] = [];
+        if (!details.hasSession) parts.push("no session");
+        if (blocked > 0) parts.push(`${blocked}GB blocked`);
+        if (!ns.fileExists(self, neighbour)) parts.push("no script");
+        return parts.length > 0 ? parts.join(", ") : "exec refused, reason unknown";
+    } catch {
+        return "unreadable";
+    }
 }
