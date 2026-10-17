@@ -25,7 +25,7 @@ import {
     type NexusState,
 } from "./strategy.ts";
 import { drainMessages } from "./lib/messages.ts";
-import { createChangeWatcher } from "./lib/self-restart.ts";
+import { createChangeWatcher, type ChangeWatcher } from "./lib/self-restart.ts";
 
 /*
  * ============================================================================
@@ -141,7 +141,23 @@ export async function main(ns: NS): Promise<void> {
     // Reloads this script when its own file changes on disk. See the module for
     // why this exists; constructed once, and disabled entirely when no usable
     // fingerprint can be read.
-    const changeWatcher = createChangeWatcher(ns);
+    //
+    // GUARDED, because it has taken the orchestrator down twice. Constructing it walks
+    // the home filesystem, and anything that throws there killed nexus AFTER the roster
+    // printed and BEFORE the loop began — so the symptom was a script that announced
+    // thirteen features, loaded none of them, and returned to the prompt. No pass ever
+    // ran, so the loop's own error handling could not report it.
+    //
+    // A watcher is a convenience: it saves the developer a manual restart. It must never
+    // be able to prevent the framework from starting, so a failure here disables it and
+    // says so rather than propagating.
+    let changeWatcher: ChangeWatcher;
+    try {
+        changeWatcher = createChangeWatcher(ns);
+    } catch (error) {
+        ns.tprint(`WARN: file watcher unavailable (${describeError(error)}) — reload manually after edits`);
+        changeWatcher = { enabled: () => false, check: () => false };
+    }
 
     let lastLoadAt = 0;
     let consecutiveFailures = 0;
