@@ -80,19 +80,41 @@ test("an edited file triggers a restart", () => {
     assert.equal(spawned.length, 1);
 });
 
-test("a file ADDED after boot triggers a restart", () => {
-    // The case the boot walk alone cannot see: `boot` is built once, so a new file is
-    // not a key in it and `firstChanged` can never report it. Without the rescan the file
-    // syncs in and nothing reloads — the exact trap the module exists to remove.
+test("an unchanged tree never restarts, however often it is checked", () => {
+    // THE PROPERTY THAT MATTERS MOST, and the one a rescan broke.
+    //
+    // The watcher used to re-walk the tree on every check and compare it against the map
+    // built at boot. Two walks of the same home need not enumerate the same set — `ns.ls`
+    // ordering is not guaranteed, and a bounded walk can stop in a different place — so a
+    // file missing from `boot` looked NEW on every pass. Measured: nexus respawning
+    // itself continuously, with the full feature roster printed twice a second.
+    //
+    // A watcher that fires on nothing is worse than one that misses a rare new file. The
+    // miss is one manual restart away; a loop cannot be broken by the user at all.
+    const files = new Map<string, FakeFile>([
+        ["/nexus.ts", { mtime: 1 }],
+        ["/lib/context.ts", { mtime: 1 }],
+    ]);
+    const { ns, spawned } = fakeNs(files);
+    const watcher = createChangeWatcher(ns);
+
+    for (let i = 0; i < 50; i++) {
+        assert.equal(watcher.check(), false, `restarted on an unchanged tree at check ${i}`);
+    }
+    assert.equal(spawned.length, 0);
+});
+
+test("a new file does not restart on its own, the price of that stability", () => {
+    // Stated as a test rather than left in a comment, so the trade-off cannot be "fixed"
+    // back into a loop by someone who notices the miss and not the reason for it.
     const files = new Map<string, FakeFile>([["/nexus.ts", { mtime: 1 }]]);
     const { ns, spawned } = fakeNs(files);
     const watcher = createChangeWatcher(ns);
 
     assert.equal(watcher.check(), false);
-
     files.set("/lib/brand-new.ts", { mtime: 5 });
-    assert.equal(watcher.check(), true, "a new file did not trigger a restart");
-    assert.equal(spawned.length, 1);
+    assert.equal(watcher.check(), false, "a new file triggered a restart");
+    assert.equal(spawned.length, 0);
 });
 
 test("an unreadable file is not treated as new", () => {

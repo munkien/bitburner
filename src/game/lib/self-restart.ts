@@ -85,29 +85,24 @@ export function createChangeWatcher(ns: NS): ChangeWatcher {
     // No fingerprint for our own file, no check. A file that cannot be read once
     // is not a file to restart on the strength of a later read succeeding.
     if ((boot.get(self.filename) ?? -1) < 0) return DISABLED;
-
-    // A NEW FILE IS A CHANGE, and it is the case the boot walk alone cannot see.
+    // NO RESCAN FOR NEW FILES, DELIBERATELY — and this reverses a change made earlier
+    // today.
     //
-    // `boot` is built once, from the tree as it stood at boot. A file added afterwards
-    // — a new feature, a new `lib/` module — is pushed by file sync and then never
-    // watched, because it is not a key in `boot` and `firstChanged` iterates that map.
-    // So the file arrives and NOTHING RELOADS, which is precisely the "an edit silently
-    // has no effect" trap this module exists to remove, reappearing for new files.
+    // A new file IS a change the boot walk cannot see, and re-walking each pass caught
+    // it. But it made the check UNSTABLE: `boot` is built from one walk, the rescan does
+    // another, and nothing guarantees the two enumerate the same set. Once the walk is
+    // bounded by `MAX_DIRECTORIES` and `ns.ls` ordering is not guaranteed, each pass can
+    // reach a different subset — so files missing from `boot` look NEW on every check,
+    // and nexus respawns itself in a loop. Measured: the full feature roster printed
+    // twice in the same second, forever.
     //
-    // The rescan is affordable. `ns.ls` is already called at boot for the same walk, so
-    // its 0.2 GB is a STATIC cost this script pays whether or not the rescan happens;
-    // `getFileMetadata` is free. The tree is ~55 files and this runs once a second.
-    const scanForNew = (): string | null => {
-        for (const file of discoverTree(ns, self.filename)) {
-            if (boot.has(file)) continue;
-            // Not merely present but readable: a file mid-write has no usable mtime,
-            // and spawning into a half-synced script is worse than waiting a second.
-            if (readMtime(ns, file) === null) continue;
-            return file;
-        }
-        return null;
-    };
-
+    // Trading a rare miss (a brand-new file does not trigger a reload until the next
+    // restart) for an infinite loop is the right way round. The restart that a new file
+    // would have wanted is one `run /nexus.ts` away; a loop cannot be broken by the user.
+    //
+    // The `boot` map itself is only used when every key was readable, so a truncated walk
+    // makes the watcher under-cover rather than misfire — and `MAX_DIRECTORIES` announces
+    // when it truncates.
     let fired = false;
 
     // SAY WHAT IS BEING WATCHED, at startup. Coverage was previously invisible: the
@@ -123,10 +118,7 @@ export function createChangeWatcher(ns: NS): ChangeWatcher {
             // over, and a second spawn from a dying script would start a duplicate.
             if (fired) return false;
 
-            // Modified files first, so an edit to existing code is reported ahead of a
-            // new file that arrived in the same sync — the edit is what the reader is
-            // usually looking for.
-            const changed = firstChanged(ns, boot) ?? scanForNew();
+            const changed = firstChanged(ns, boot);
             // Nothing changed. A file that vanished reads as -1, which is not a
             // change — spawning into a missing file would fail.
             if (changed === null) return false;
