@@ -1,4 +1,5 @@
 import type { HacknetServerHashUpgrade, NS } from "@ns";
+import { bladeburnerActivity } from "./lib/bladeburner-activity.ts";
 import { surplus, type Context } from "./lib/context.ts";
 import { ChangeLog, announce, shortError } from "./lib/log.ts";
 import { readNetWorth } from "./lib/net-worth.ts";
@@ -329,6 +330,36 @@ function spendHashes(ns: NS, context: Context): void {
 
 function chooseHashUpgrade(ns: NS, context: Context, hashes: number, wealth: number): HashChoice | null {
     const candidates: HashChoice[] = [];
+
+    /*
+     * ── 0a. Bladeburner rank and SP, while the division is working ──
+     *
+     * The two upgrades that speed up Bladeburner are "Exchange for Bladeburner Rank" and
+     * "Exchange for Bladeburner SP", and they are worth buying ONLY while an action is
+     * running — that is when rank accrues and when skills compound. Buying them while the
+     * division sits idle spends hashes on a number nothing is using.
+     *
+     * THIS MUST LEAD, for the reason the training branch below records: a rule that sits
+     * behind the cash-target rule never fires, because that rule returns first.
+     *
+     * IT CANNOT USE `getCurrentWork()`. Bladeburner actions are invisible to the
+     * Singularity API — it reports null while one runs — so the answer arrives from the
+     * bladeburner feature, which already pays for `getCurrentAction()` and publishes the
+     * result (see lib/bladeburner-activity.ts).
+     *
+     * RANK BEFORE SP, but only up to the faction gate. Rank is spent on nothing; it
+     * unlocks (the faction at 25, and the higher-tier actions) and otherwise accrues from
+     * the actions themselves. Skill points are the scarce, compounding resource, so once
+     * the gate is cleared SP is the better buy. At 250 hashes for 100 rank versus 250 for
+     * 10 SP, that is a real choice rather than a rounding difference.
+     */
+    const bb = bladeburnerActivity();
+    if (bb.running) {
+        const upgrade: HacknetServerHashUpgrade =
+            bb.rank < 25 ? "Exchange for Bladeburner Rank" : "Exchange for Bladeburner SP";
+        const cost = ns.hacknet.hashCost(upgrade);
+        if (isFinite(cost) && cost > 0 && hashes >= cost) return { upgrade };
+    }
 
     /*
      * ── 0. The upgrade for what the player is DOING, first ──

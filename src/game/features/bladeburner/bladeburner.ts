@@ -1,5 +1,6 @@
 import type { BladeburnerActionName, BladeburnerActionType, BladeburnerSkillName, NS } from "@ns";
 
+import { publishBladeburnerActivity } from "../../lib/bladeburner-activity.ts";
 import type { Context } from "../../lib/context.ts";
 import { bladeburnerYieldsForTraining, hasSingularityWork, trainingRemaining, winnableBlackOp } from "../player/activity.ts";
 import { announce, clearStatus, publishStatus, shortError } from "../../lib/log.ts";
@@ -477,9 +478,29 @@ export function reset(): void {
  */
 let reason = "";
 
+/**
+ * The last action seen, published for features that cannot see Bladeburner themselves.
+ *
+ * Set on every tick that reads `getCurrentAction()`, so it is current rather than
+ * sticky — a stale "running: true" would keep hacknet spending hashes on Bladeburner for
+ * the rest of the run after the division stopped working.
+ *
+ * Read through the getter closure rather than captured, for the same reason the status
+ * publisher is: the action is read further down this function than the registration.
+ */
+let actionRunning = false;
+
 export function tick(ns: NS, context: Context): void {
     const bb = ns.bladeburner;
     publishStatus("bladeburner", () => reason || "starting");
+
+    // Published every tick, including the early returns below — the not-in-division
+    // branch publishes "not running", which is the truth when there is no division and
+    // the safe reading for a reader deciding whether to spend hashes on one.
+    publishBladeburnerActivity({
+        running: actionRunning,
+        rank: bb.inBladeburner() ? Math.max(0, bb.getRank()) : 0,
+    });
 
     if (!bb.inBladeburner()) {
         // Joining is attempted every tick, but the branch is left for good once
@@ -528,6 +549,10 @@ export function tick(ns: NS, context: Context): void {
 
     const current = bb.getCurrentAction();
     const currentName = current?.name;
+    // Published for `hacknet`, which cannot see a Bladeburner action through the
+    // Singularity API. Set here, where the action is actually read, so it cannot
+    // describe a state this tick did not observe.
+    actionRunning = current !== null;
 
     // A contract or operation can run out of counts; every other action cannot.
     // The game reports the current action as plain strings, so narrow it here,
