@@ -43,6 +43,15 @@ const RESTART_DELAY_MS = 1_000;
 const MAX_DIRECTORIES = 500;
 
 /**
+ * The clock the debounce reads, held at module scope so a test can step it.
+ *
+ * `Date.now` in production. `advanceWatcherClockForTest` swaps it for a fake, which is
+ * why it cannot be a local inside `createChangeWatcher`: the test must reach the same
+ * binding the closure reads.
+ */
+let now: () => number = Date.now;
+
+/**
  * Watches this script's own file for changes.
  *
  * Constructed once at boot. If the fingerprint cannot be read the watcher is
@@ -104,6 +113,10 @@ export function createChangeWatcher(ns: NS): ChangeWatcher {
     // makes the watcher under-cover rather than misfire — and `MAX_DIRECTORIES` announces
     // when it truncates.
     let fired = false;
+    /** When the current change was first seen, until it either fires or is cleared. */
+    let changeSeenAt: number | null = null;
+    /** Which file that was, so a different change restarts the clock. */
+    let lastChanged: string | null = null;
 
     // SAY WHAT IS BEING WATCHED, at startup. Coverage was previously invisible: the
     // watcher could be covering the wrong tree, or a truncated one, and the only symptom
@@ -121,7 +134,33 @@ export function createChangeWatcher(ns: NS): ChangeWatcher {
             const changed = firstChanged(ns, boot);
             // Nothing changed. A file that vanished reads as -1, which is not a
             // change — spawning into a missing file would fail.
-            if (changed === null) return false;
+            if (changed === null) {
+                changeSeenAt = null;
+                return false;
+            }
+
+            // DEBOUNCE, because file sync rewrites files REPEATEDLY, not once.
+            //
+            // `boot` snapshots mtimes at construction. `bitburner-filesync` then keeps
+            // writing for as long as it runs, so `firstChanged` reports a change on every
+            // pass while a sync is in flight — and each `fired` guard is per-process, so
+            // it cannot stop the NEXT process from respawning in the same way. Measured:
+            // nexus booted and died repeatedly, mid-pass, with the exit trap recording
+            // "unknown (never wrote the exit reason this pass)" because the death was a
+            // spawn, not a crash.
+            //
+            // The rule: a change must be STABLE for a grace period before it is acted on.
+            // The first sighting records the clock; only when the same file has kept its
+            // new mtime for `RESTART_DELAY_MS` is it a genuine edit rather than a half-
+            // written sync. A later change resets the clock, so a stream of writes never
+            // triggers a restart at all.
+            const nowMs = now();
+            if (changeSeenAt === null || lastChanged !== changed) {
+                changeSeenAt = nowMs;
+                lastChanged = changed;
+                return false;
+            }
+            if (nowMs - changeSeenAt < RESTART_DELAY_MS) return false;
 
             fired = true;
 
@@ -296,4 +335,18 @@ function discoverTree(ns: NS, entry: string): string[] {
 function basenameOf(path: string): string {
     const parts = path.split("/");
     return parts[parts.length - 1] ?? path;
+}
+
+/**
+ * Step the watcher's clock forward by a fixed amount, for tests.
+ *
+ * The debounce is real-time, but a test must not wait a second between checks. This
+ * replaces the clock with a fake that advances `ms` on every read, so `RESTART_DELAY_MS`
+ * can be crossed in two calls. Production never calls it.
+ */
+export function advanceWatcherClockForTest(ms: number): void {
+    // Returns a larger value on every read, so the debounce's grace period can be crossed
+    // by calling check() twice. Production never calls this.
+    let cursor = now();
+    now = () => (cursor += ms);
 }

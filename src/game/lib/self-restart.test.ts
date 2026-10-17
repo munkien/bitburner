@@ -20,7 +20,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createChangeWatcher } from "./self-restart.ts";
+import { advanceWatcherClockForTest, createChangeWatcher } from "./self-restart.ts";
 import type { NS } from "@ns";
 
 interface FakeFile {
@@ -64,7 +64,7 @@ function fakeNs(files: Map<string, FakeFile>, entry = "/nexus.ts") {
     return { ns, spawned };
 }
 
-test("an edited file triggers a restart", () => {
+test("an edited file triggers a restart, after the grace period", () => {
     const files = new Map<string, FakeFile>([
         ["/nexus.ts", { mtime: 1 }],
         ["/lib/context.ts", { mtime: 1 }],
@@ -75,8 +75,10 @@ test("an edited file triggers a restart", () => {
 
     assert.equal(watcher.check(), false, "restarted with nothing changed");
 
+    advanceWatcherClockForTest(2000);
     files.set("/lib/context.ts", { mtime: 2 });
-    assert.equal(watcher.check(), true, "an edited file did not trigger a restart");
+    assert.equal(watcher.check(), false, "fired on the first sighting of a change");
+    assert.equal(watcher.check(), true, "a stable change did not trigger a restart");
     assert.equal(spawned.length, 1);
 });
 
@@ -137,12 +139,15 @@ test("an unreadable file is not treated as new", () => {
 
 test("only one restart happens, however often check is called", () => {
     // `spawn` terminates this script. A second call from a dying process would start a
-    // duplicate orchestrator.
+    // duplicate orchestrator — and the `fired` guard must hold across any number of
+    // checks once the debounce has let the restart through.
     const files = new Map<string, FakeFile>([["/nexus.ts", { mtime: 1 }]]);
     const { ns, spawned } = fakeNs(files);
     const watcher = createChangeWatcher(ns);
 
+    advanceWatcherClockForTest(2000);
     files.set("/nexus.ts", { mtime: 2 });
+    assert.equal(watcher.check(), false);
     assert.equal(watcher.check(), true);
     assert.equal(watcher.check(), false);
     assert.equal(watcher.check(), false);
