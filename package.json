@@ -24,8 +24,9 @@
     "check:game": "node scripts/check-game-imports.mjs",
     "test": "node --experimental-transform-types --test 'src/game/**/*.test.ts'",
     "run:summary": "node scripts/run-summary.mjs",
-    "sync": "npm run check:game && bitburner-filesync",
+    "sync": "npm run stamp && npm run check:game && bitburner-filesync",
     "build:ui": "vite build --mode ui",
-    "dev:ui": "vite --mode ui"
+    "dev:ui": "vite --mode ui",
+    "stamp": "node scripts/stamp-build.mjs"
   }
 }

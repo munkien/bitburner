@@ -96,6 +96,15 @@ const TELEMETRY_MS = 1_000;
 const QUEUE_DISPLAY_LIMIT = 10;
 
 /**
+ * Where the build leaves the commit it was made from.
+ *
+ * Written beside this script by `scripts/stamp-build.mjs`, which `npm run sync` runs
+ * before pushing. The game cannot run `git`, so a file is the only way the answer can
+ * travel with the code it describes.
+ */
+const BUILD_STAMP = "build.txt";
+
+/**
  * The largest failure count that still looks like a transient fault. A feature
  * that is simply not deployed is handled per-feature and does not count here.
  */
@@ -107,9 +116,16 @@ export async function main(ns: NS): Promise<void> {
     // To the Terminal rather than the log panel: the first pass clears the panel,
     // so a startup line printed there would be gone before it could be read.
     ns.tprint("INFO: starting orchestrator");
-    // Names the build in the Terminal, so a stale in-game copy is obvious rather
-    // than something to infer from the absence of telemetry.
-    ns.tprint("INFO: build: telemetry+commands (nexus.ts v2)");
+    // NAMES THE COMMIT, so a stale in-game copy is obvious rather than something to
+    // infer from the absence of telemetry.
+    //
+    // The game cannot run `git`, so the answer is left on disk by the build —
+    // `scripts/stamp-build.mjs` writes `build.txt`, `npm run sync` runs it, and the file
+    // travels through the sync like any other. It used to print the constant "nexus.ts
+    // v2", which could not distinguish a current copy from a two-day-old one; that is
+    // exactly the question that went unanswered while a run was diagnosed against code
+    // that had never been synced.
+    ns.tprint(`INFO: build: ${buildStamp(ns)}`);
 
     let capabilities: Capabilities = detectCapabilities(ns);
     ns.tprint(`INFO: ${capabilities.describe()}`);
@@ -657,5 +673,26 @@ function report(ns: NS, states: readonly FeatureStatus[], context: Context): voi
         ns.print("");
         ns.print(`─── recent (last ${recent.length}) ───`);
         for (const note of recent) ns.print(note);
+    }
+}
+
+/**
+ * The commit this copy was built from, or a plain explanation of why it cannot say.
+ *
+ * Read from `build.txt`, which the build writes beside this script. Never throws and
+ * never returns empty: a caller printing the build should not have to handle a failure,
+ * and "unknown" is a far more useful line than nothing at all.
+ *
+ * The file is written by `scripts/stamp-build.mjs`, which `npm run sync` runs first. If
+ * it is missing, this copy was synced by something that did not stamp it — which is
+ * itself worth knowing.
+ */
+function buildStamp(ns: NS): string {
+    try {
+        if (!ns.fileExists(BUILD_STAMP, "home")) return "unstamped (build.txt not synced)";
+        const stamp = ns.read(BUILD_STAMP).trim();
+        return stamp === "" ? "unstamped (build.txt empty)" : stamp;
+    } catch {
+        return "unknown (build.txt unreadable)";
     }
 }
