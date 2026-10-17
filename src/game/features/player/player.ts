@@ -980,14 +980,24 @@ interface AugSelectionFilter {
 }
 
 function buyAffordableAugments(ns: NS, player: Player, owned: string[], recent: RecentLines): void {
-    const gang = getGangFaction(ns);
+    // THE GANG FACTION IS INCLUDED, deliberately.
+    //
+    // This loop used to skip it, and nothing else bought gang augmentations either — the
+    // gang feature purchases EQUIPMENT, never augments — so a player leading a gang could
+    // never buy what that gang offered.
+    //
+    // The skip looks like it was guarding the reputation check below: you cannot work for
+    // a gang faction ("you are managing a gang for it"), and passive reputation is skipped
+    // for it too, so its reputation only grows through other unlocks. But the game gates
+    // gang augmentations on faction reputation exactly like any other faction, through the
+    // same `purchaseAugmentation` path — so the check below is the right gate, and the
+    // skip simply removed the only route to those augments.
     const seen = new Set(owned);
     let bought = true;
 
     while (bought) {
         bought = false;
         for (const faction of player.factions) {
-            if (faction === gang) continue;
             const currentRep = ns.singularity.getFactionRep(faction);
 
             for (const aug of ns.singularity.getAugmentationsFromFaction(faction)) {
