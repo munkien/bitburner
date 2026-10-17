@@ -49,7 +49,20 @@ export function reset(): void {
     handoffStarted = false;
 }
 
+/**
+ * Put the module back into the state a stalled run reaches: a handoff that was started
+ * and never finished. Exported for tests only — there is no runtime path that should set
+ * this directly, because the flag is owned by `reconcileHandoff` and `handoff`.
+ */
+export function markHandoffStartedForTest(): void {
+    handoffStarted = true;
+}
+
 export function tick(ns: NS, context: Context): void {
+    // Reconcile before deciding: a handoff that exited without installing must not keep
+    // the decision answering "already running" for the rest of the run.
+    reconcileHandoff(ns);
+
     const facts = readFacts(ns, context);
     const verdict = decideRetirement(facts);
 
@@ -251,4 +264,36 @@ function handoff(ns: NS): void {
     }
 
     announce(ns, "RETIRE", `ERROR: failed to start ${file}. Retrying next tick.`, "error");
+}
+
+/**
+ * Whether the handoff we started is still in flight.
+ *
+ * THE FLAG USED TO LATCH, AND THAT STALLED RUNS WITH AUGMENTATIONS QUEUED. Once
+ * `handoffStarted` was set the decision returned "the installer is already running" on
+ * every later tick, whether or not anything was. `install.ts` refuses and exits without
+ * installing in two ordinary cases — the orchestrator is not on home, or nothing is
+ * actually queued — and the orchestrator survives both, because a refused handoff never
+ * killed anything. So the run reported an installer that had already exited, forever, with
+ * nine augmentations bought and no install.
+ *
+ * Cleared here rather than in the failure paths inside `install.ts`: that script may be
+ * killed or reset mid-flight, and a flag it is responsible for clearing would leak in
+ * exactly the cases that matter. The orchestrator is the only process that observes the
+ * outcome, so the orchestrator is the one that reconciles it.
+ */
+export function reconcileHandoff(ns: NS): void {
+    if (!handoffStarted) return;
+    const file = findScriptOnHome(ns, HANDOFF_NAME);
+    // Deployed but not running: it exited without installing. Reset so the next tick can
+    // try again, and say so once — silence here is what made the stall look like patience.
+    if (file !== null && !ns.scriptRunning(file, "home")) {
+        handoffStarted = false;
+        announce(
+            ns, "RETIRE",
+            `The install handoff exited without installing; retrying. ` +
+            `(${HANDOFF_NAME} reports its reason above.)`,
+            "warn",
+        );
+    }
 }

@@ -248,10 +248,16 @@ const RULES: Readonly<Record<CapabilityKey, CapabilityRule>> = {
      * factions, only graft them. Peeking at the node here lets progression drop
      * the whole purchase pipeline — reserve, donations, faction rep-farming —
      * rather than keep spending toward a purchase the node will never allow.
+     *
+     * BITNODE 9 IS NOT EXCLUDED, and used to be. The game's BN9 multipliers change
+     * Hacknet Servers, stat levels and server money; they do not touch
+     * `AugmentationMoneyCost` or `AugmentationRepCost`, and nothing in the node
+     * prevents a faction purchase. Excluding it switched off the entire pipeline —
+     * reserve, donations, rep-farming, buying — for a node that augments normally.
      */
     augmentPurchase: {
         label: "Augment purchasing",
-        excludedBitNodes: [8, 9],
+        excludedBitNodes: [8],
     },
     tor: {
         label: "TOR router",
