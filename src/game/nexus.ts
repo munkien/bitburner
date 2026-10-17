@@ -677,15 +677,20 @@ function report(ns: NS, states: readonly FeatureStatus[], context: Context): voi
 }
 
 /**
- * The commit this copy was built from, or a plain explanation of why it cannot say.
+ * A fingerprint of the source this copy was built from, or why it cannot say.
  *
- * Read from `build.txt`, which the build writes beside this script. Never throws and
+ * Read from `build.txt`, which `npm run sync` writes beside this script. Never throws and
  * never returns empty: a caller printing the build should not have to handle a failure,
  * and "unknown" is a far more useful line than nothing at all.
  *
- * The file is written by `scripts/stamp-build.mjs`, which `npm run sync` runs first. If
- * it is missing, this copy was synced by something that did not stamp it — which is
- * itself worth knowing.
+ * THE FINGERPRINT IS A HASH OF THE SOURCE FILES, not of a commit. Two copies of the same
+ * code stamp identically whatever the repository says, which is the equality a reader
+ * actually wants — "is the game running the code on disk?". Keying it to a commit made
+ * that question depend on git bookkeeping that cannot be written inside the thing it
+ * describes. The commit is still appended, after `@`, for convenience.
+ *
+ * So comparing this line to a fresh `npm run stamp` answers "is the game current?":
+ * same fingerprint means same source.
  */
 function buildStamp(ns: NS): string {
     try {
