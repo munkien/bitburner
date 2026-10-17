@@ -6,6 +6,7 @@ import { findScriptOnHome } from "../../lib/scripts.ts";
 // re-exports is not something it can follow — that is what produced "Progression is deployed
 // but would not compile".
 import { REACH_SEC, floorEtaSeconds, floorReachable } from "../../lib/training-budget.ts";
+import { TRAIN_CAP_MS, TRAIN_COOLDOWN_MS, capApplies, clearTrainingClock, trainCapVerdict } from "../../lib/training-cap.ts";
 import { observe, rateFor, type MeasuredStat, type OpenSample, type RateSample } from "../../lib/rate-tracker.ts";
 import {
     belowFloor,
@@ -411,6 +412,12 @@ export function tick(ns: NS, context: Context): void {
         reason = "nothing to do: the priority chain returned no action";
         return;
     }
+
+    // The training cap measures the run's PATIENCE with training, not any one action. When
+    // the chosen action is not training, that patience is not being spent, so the budget is
+    // released — otherwise a run that trained for fourteen minutes, went and did faction
+    // work, and came back would be capped one minute into the second stretch.
+    if (!capApplies(chosen.kind)) clearTrainingClock(ns);
 
     // ONE ACTION PER TICK, and travel is an action.
     //
@@ -1080,6 +1087,24 @@ function statFloor(ns: NS, player: Player, goal: Goal | null): PlayerAction | nu
             `floor:${under.kind}`, "Training", "abandoned",
             `${skill} target ${under.target} is ${formatEta(eta)} away at the measured rate ` +
             `(budget ${formatEta(REACH_SEC)}) — working on something reachable instead`,
+        );
+        return null;
+    }
+
+    // A hard wall-clock cap, separate from the reachability budget above.
+    //
+    // The budget can refuse nothing when the rate is unknown — `floorReachable` treats a
+    // null or infinite rate as "keep going", because refusing on no evidence would stop a
+    // fresh run from ever training. That leaves a stat the rate model cannot see being
+    // trained indefinitely, which is the reported complaint. A clock does not care whether
+    // the target is reachable: after `TRAIN_CAP_MS` the run stops regardless, and
+    // `TRAIN_COOLDOWN_MS` must pass before it can start again.
+    const cap = trainCapVerdict(ns);
+    if (cap === "capped") {
+        log?.change(
+            "training-cap", "Training", "paused",
+            `gym/course training capped after ${formatEta(TRAIN_CAP_MS / 1000)} — ` +
+            `cooling down for ${formatEta(TRAIN_COOLDOWN_MS / 1000)} before it can start again`,
         );
         return null;
     }
