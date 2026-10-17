@@ -54,6 +54,30 @@ export interface WormReport {
      * is out there" and "we cannot see it".
      */
     readonly spread?: readonly string[];
+    /**
+     * What went wrong, when something did.
+     *
+     * WHY THIS IS THE POINT OF THE WHOLE REPORT. Every field above describes what a
+     * worker SAW; none of them says what it FAILED to do. A worker whose `probe` threw,
+     * whose cache open was refused, or whose spread was rejected by `exec` produced a
+     * report indistinguishable from one on a host with no neighbours — and the Master
+     * cannot tell "nothing is out there" from "we could not look".
+     *
+     * That distinction is the one that has cost real time on this feature: a worker that
+     * died before doing anything at all sent NO report, and an empty map read the same
+     * way as a net with nothing in it.
+     *
+     * Absent means "no problems", so a healthy report stays short.
+     */
+    readonly problems?: readonly WorkerProblem[];
+}
+
+/** One thing a worker could not do, and why. */
+export interface WorkerProblem {
+    /** Which step: `probe`, `earn`, `spread`, `exec`. */
+    readonly step: string;
+    /** The failure in the game's own words where it gave any, or a short description. */
+    readonly detail: string;
 }
 
 /**
@@ -131,6 +155,7 @@ function asReport(raw: unknown): WormReport | null {
         opened?: unknown;
         karmaLost?: unknown;
         spread?: unknown;
+        problems?: unknown;
     };
     if (typeof candidate.from !== "string" || candidate.from === "") return null;
     if (!Array.isArray(candidate.reachable)) return null;
@@ -146,5 +171,16 @@ function asReport(raw: unknown): WormReport | null {
         ? candidate.spread.filter((host): host is string => typeof host === "string")
         : [];
 
-    return { from: candidate.from, reachable, depth, opened, karmaLost, spread };
+    // Problems are passed through when they look like problems, and DROPPED otherwise.
+    // A malformed one must not invalidate the whole report: the discovery is the valuable
+    // part, and losing it because a diagnostic field was the wrong shape would be the
+    // same failure this channel exists to prevent.
+    const problems = Array.isArray(candidate.problems)
+        ? candidate.problems.filter((p): p is WorkerProblem =>
+            typeof p === "object" && p !== null
+            && typeof (p as WorkerProblem).step === "string"
+            && typeof (p as WorkerProblem).detail === "string")
+        : [];
+
+    return { from: candidate.from, reachable, depth, opened, karmaLost, spread, problems };
 }

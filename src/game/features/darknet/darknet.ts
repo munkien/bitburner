@@ -149,6 +149,9 @@ let warnedNoWorm = false;
 
 /** Hosts already reported for a refused `exec`, so the warning is once each. */
 const warnedExec = new Set<string>();
+
+/** The last problem reported per (host, step), so a repeating failure says it once. */
+const lastProblem = new Map<string, string>();
 /** Whether the one-shot diagnostic has been printed. */
 let diagnosed = false;
 
@@ -189,6 +192,7 @@ export function reset(): void {
     log = null;
     warnedNoWorm = false;
     warnedExec.clear();
+    lastProblem.clear();
     status = "";
     diagnosed = false;
     cachesOpened = 0;
@@ -243,6 +247,22 @@ export function tick(ns: NS, context: Context): void {
             cachesOpened += report.opened ?? 0;
             karmaSpent += report.karmaLost ?? 0;
             announce(ns, "DNET", `opened ${report.opened} cache(s) on ${report.from} (${report.karmaLost} karma)`, "tx");
+        }
+
+        // What the worker could not do. Reported because the alternative is an empty
+        // map that looks like a net with nothing beneath it: a probe that threw, a cache
+        // that was refused, a neighbour that would not take a copy — each of those
+        // previously left NO trace, and each is the difference between "nothing is out
+        // there" and "we could not look".
+        //
+        // Per host rather than per report, so a worker redeployed onto the same failing
+        // host every tick does not fill the console with the same line.
+        for (const problem of report.problems ?? []) {
+            const key = `${report.from}:${problem.step}`;
+            const said = `${problem.step}: ${problem.detail}`;
+            if (lastProblem.get(key) === said) continue;
+            lastProblem.set(key, said);
+            announce(ns, "DNET", `worker on ${report.from} — ${said}`, "warn");
         }
     }
 

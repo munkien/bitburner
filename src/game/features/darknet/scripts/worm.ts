@@ -1,6 +1,6 @@
 import type { NS } from "@ns";
 
-import { sendReport, type WormReport } from "../darknet-reports.ts";
+import { sendReport, type WorkerProblem, type WormReport } from "../darknet-reports.ts";
 import { readCacheResult, worthOpening, worthPhishing } from "../darknet-money.ts";
 import { findScriptOnHome } from "../../../lib/scripts.ts";
 
@@ -47,6 +47,16 @@ export async function main(ns: NS): Promise<void> {
     const host = ns.args[0];
     if (typeof host !== "string") return;
 
+    // A worker that dies before reporting is invisible, and that has cost real time on
+    // this feature: an empty map reads exactly like a net with nothing in it, and a
+    // worker that never ran reads like a host with no neighbours. So every step records
+    // WHY it failed, and the report is sent even when the probe did not work — that is
+    // the case most worth hearing about.
+    const problems: WorkerProblem[] = [];
+    const note = (step: string, detail: string): void => {
+        problems.push({ step, detail });
+    };
+
     // The Master's answers about the RUN, passed as arguments because a worker has no
     // `Context`: it needs the goal to know whether karma and charisma are still
     // wanted, and it cannot read `context.snapshot` on a darknet host.
@@ -63,22 +73,28 @@ export async function main(ns: NS): Promise<void> {
     let reachable: string[] = [];
     try {
         reachable = ns.dnet.probe();
-    } catch {
-        // The host went offline or restarted underneath us, which a mutation can do
-        // at any moment. Reporting nothing is correct: the Master will re-deploy.
+    } catch (error) {
+        // Reported rather than returning. A worker that exits here sends nothing, and
+        // from the Master's side that is indistinguishable from a host with no
+        // neighbours — the whole map stays at whatever it was, with no clue why.
+        note("probe", error instanceof Error ? error.message : String(error));
+        sendReport(ns, { from: host, reachable, depth: -1, problems });
         return;
     }
 
     let depth = -1;
     try {
         depth = ns.dnet.getDepth(host);
-    } catch {
-        depth = -1;
+    } catch (error) {
+        // Not fatal — discovery still worked — but recorded, because a host reporting
+        // depth -1 when it is not the entry means the walk cannot order its frontier.
+        note("depth", error instanceof Error ? error.message : String(error));
     }
 
     // Earning, after discovery: a failed cache open must not cost the report, or the
     // Master loses a discovered neighbourhood to a bug in the money path.
-    const { opened, karmaLost } = await earn(ns, host, wantKarma, wantCharisma);
+    const { opened, karmaLost, problem } = await earn(ns, host, wantKarma, wantCharisma);
+    if (problem !== undefined) note("earn", problem);
 
     // Spread onward BEFORE reporting.
     //
@@ -93,9 +109,12 @@ export async function main(ns: NS): Promise<void> {
     // re-deploys itself to the places it just found, and the frontier advances one hop
     // per generation. The Master still owns the sessions and the map; this only extends
     // the reach.
-    const spread = await spreadOnward(ns, host, reachable, wantKarma, wantCharisma);
+    const { started: spread, problem: spreadProblem } = await spreadOnward(
+        ns, host, reachable, wantKarma, wantCharisma,
+    );
+    if (spreadProblem !== undefined) note("spread", spreadProblem);
 
-    const report: WormReport = { from: host, reachable, depth, opened, karmaLost, spread };
+    const report: WormReport = { from: host, reachable, depth, opened, karmaLost, spread, problems };
     sendReport(ns, report);
 }
 
@@ -116,10 +135,14 @@ async function spreadOnward(
     neighbours: readonly string[],
     wantKarma: boolean,
     wantCharisma: boolean,
-): Promise<string[]> {
+): Promise<{ started: string[]; problem?: string }> {
     const started: string[] = [];
+    /** The first neighbour that refused, if any. */
+    let problem: string | undefined;
     const self = findScriptOnHome(ns, WORM_NAME);
-    if (self === null) return started;
+    // Reported rather than returning bare: without the script a worker cannot spread, so
+    // the walk stops at this depth, and that is invisible from the Master.
+    if (self === null) return { started, problem: `${WORM_NAME} not found from ${host}` };
 
     for (const neighbour of neighbours) {
         // Back towards home would be a wasted deployment, and `home` is not a darknet
@@ -134,13 +157,16 @@ async function spreadOnward(
             if (ns.exec(self, neighbour, 1, neighbour, wantKarma, wantCharisma) > 0) {
                 started.push(neighbour);
             }
-        } catch {
+        } catch (error) {
             // No session yet, or the neighbour moved. The Master will try again once it
-            // holds one; a worker does not retry, because it exits.
+            // holds one; a worker does not retry, because it exits. Recorded because a
+            // neighbour that refuses is the difference between "nothing is out there"
+            // and "we could not reach it", and only the reason tells them apart.
+            problem ??= `scp/exec to ${neighbour} failed: ${error instanceof Error ? error.message : String(error)}`;
         }
     }
 
-    return started;
+    return { started, problem };
 }
 
 /**
@@ -159,16 +185,19 @@ async function earn(
     host: string,
     wantKarma: boolean,
     wantCharisma: boolean,
-): Promise<{ opened: number; karmaLost: number }> {
+): Promise<{ opened: number; karmaLost: number; problem?: string }> {
     let opened = 0;
     let karmaLost = 0;
+    /** The first thing that went wrong, if anything did. */
+    let problem: string | undefined;
 
     // Caches first: they are a one-off find, so leaving one behind loses it, while
     // phishing can be repeated on a later deployment.
     let caches: string[] = [];
     try {
         caches = ns.ls(host, ".cache");
-    } catch {
+    } catch (error) {
+        problem ??= `ls failed: ${error instanceof Error ? error.message : String(error)}`;
         caches = [];
     }
 
@@ -178,7 +207,8 @@ async function earn(
             let result;
             try {
                 result = ns.dnet.openCache(filename, true);
-            } catch {
+            } catch (error) {
+                problem ??= `openCache refused: ${error instanceof Error ? error.message : String(error)}`;
                 break;
             }
 
@@ -217,5 +247,5 @@ async function earn(
         }
     }
 
-    return { opened, karmaLost };
+    return { opened, karmaLost, problem };
 }
