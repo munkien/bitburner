@@ -551,6 +551,7 @@ function reportBlocked(ns: NS, charisma: number): void {
         return;
     }
 
+    status = `blocked: unreachable (${candidates.length} known but none has a route from home)`;
     log?.change("blocked", "Blocked", "unreachable", `${candidates.length} known but none has a route from home`);
 }
 
@@ -773,11 +774,40 @@ function deploy(ns: NS, context: Context): void {
                     );
                 }
             }
-        } catch {
-            // The host restarted or went offline between the session and now, which
-            // is routine. Dropping the session is the correct response; the map
-            // still knows the host, and the next reading will say whether it is back.
-            sessions.delete(host);
+        } catch (error) {
+            // NOT EVERY FAILURE MEANS THE HOST WENT AWAY.
+            //
+            // This catch used to drop the session on ANY throw, including one from the
+            // `scp` of a worker's dependencies. That produced a cycle rather than a
+            // recovery: `openRouteTo` reconnected the entry, `deploy` threw while
+            // copying, the session was deleted, and the next pass reconnected and threw
+            // again — so `sessions` read 1 in the status while the map kept recording
+            // the host as session-less, and `reportBlocked` alternated between "no
+            // targets" and "unreachable" forever.
+            //
+            // The session is now dropped only when the script is genuinely no longer
+            // running on the host, which is the condition the old comment described.
+            // Anything else is reported and the session kept: a failed copy is a reason
+            // to try again, not a reason to forget the connection.
+            const stillThere = ((): boolean => {
+                try {
+                    return ns.dnet.getServerDetails(host).hasSession;
+                } catch {
+                    return false;
+                }
+            })();
+
+            if (!stillThere) {
+                sessions.delete(host);
+                continue;
+            }
+
+            const detail = error instanceof Error ? error.message : String(error);
+            const key = `${host}:deploy`;
+            if (lastProblem.get(key) !== detail) {
+                lastProblem.set(key, detail);
+                announce(ns, "DNET", `worker deploy to ${host} failed: ${detail}`, "warn");
+            }
         }
     }
 }
