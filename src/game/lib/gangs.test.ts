@@ -24,21 +24,29 @@ import { test } from "node:test";
 import { GANG_FACTIONS, GANG_KARMA, chosenGangKind, factionsOfKind, gangFactionFor, gangKindOf } from "./gangs.ts";
 import type { FactionName } from "@ns";
 
-test("the same node always flips the same way", () => {
-    // The property the flag file exists to protect, and the one that would break worst:
-    // an alternating flip contradicts a gang that already exists.
-    for (let node = 1; node <= 40; node++) {
-        const first = chosenGangKind(node);
-        for (let i = 0; i < 25; i++) {
-            assert.equal(chosenGangKind(node), first, `node ${node} flipped differently between calls`);
-        }
-    }
+test("the flip can produce either kind", () => {
+    // A real coin toss. Both outcomes must be reachable, or the run always plays the same
+    // gang and the choice is a constant with extra steps — which is what the previous
+    // BitNode-seeded version had become, silently making every BitNode 2 run a hacking
+    // gang.
+    assert.equal(chosenGangKind(() => 0.0), "hacking");
+    assert.equal(chosenGangKind(() => 0.99), "combat");
 });
 
-test("the flip divides the nodes rather than always landing one way", () => {
+test("the flip divides an even spread of draws", () => {
+    // Not a statistical test — a check that the threshold sits at the middle rather than
+    // at an edge, where one kind would almost never be drawn.
+    const hacking = Array.from({ length: 100 }, (_, i) => chosenGangKind(() => i / 100));
+    assert.equal(hacking.filter(k => k === "hacking").length, 50);
+    assert.equal(hacking.filter(k => k === "combat").length, 50);
+});
+
+test("the default draw is not fixed", () => {
+    // With no argument the flip must use real randomness. A constant here would pin every
+    // run to one kind, which is the bug this replaced.
     const seen = new Set<string>();
-    for (let node = 1; node <= 40; node++) seen.add(chosenGangKind(node));
-    assert.equal(seen.size, 2, "the flip produced only one kind across 40 nodes");
+    for (let i = 0; i < 200; i++) seen.add(chosenGangKind());
+    assert.equal(seen.size, 2, "the default flip produced only one kind across 200 draws");
 });
 
 test("every gang faction maps to exactly one kind", () => {

@@ -95,7 +95,7 @@ export function factionsOfKind(kind: GangKind): readonly FactionName[] {
 export const GANG_CHOICE_FLAG = "gang_choice.txt";
 
 /**
- * Which kind of gang this run goes for, decided once and written down.
+ * Which kind of gang this run goes for, drawn at random and then written down.
  *
  * WHY A FLIP, AND WHY IT MUST BE PERSISTED. The choice is a coin toss between a hacking
  * gang and a combat gang, which makes each run a different exercise. The type cannot be
@@ -109,18 +109,23 @@ export const GANG_CHOICE_FLAG = "gang_choice.txt";
  * gang on one tick and a combat one on the next. That is the same shape as the goal
  * ranking's thrash, with a worse consequence — a gang, once made, is permanent.
  *
- * SEEDED FROM THE NODE, not from `Math.random()`. A stored choice is lost if the file is
- * deleted, and a lost choice that re-flips could contradict a gang that already exists.
- * Seeding on the BitNode number makes the answer REPRODUCIBLE: the same node always
- * yields the same kind, so a lost flag is recoverable rather than a second decision.
+ * RANDOM PER RUN, not seeded by anything. This was previously a deterministic mix of the
+ * BitNode number, on the reasoning that a lost flag would then recover to the same
+ * answer. That reasoning was wrong twice over: it silently made every BitNode 2 run — the
+ * one node where a gang is guaranteed — go for a hacking gang, and it turned a coin toss
+ * into a constant. A random draw per run is what was actually asked for.
  *
- * `seed` is passed rather than read, so this stays pure and testable without a game.
+ * THE COST, stated plainly: if the flag is deleted the choice is re-drawn, and the new
+ * draw may contradict a gang that already exists. That is acceptable because it is
+ * HARMLESS rather than because it cannot happen — `gangTarget` returns null once a gang
+ * exists, so the stored choice is only ever read before one is created. The draw happens
+ * exactly once in that window, and the flag records it before anything acts on it.
+ *
+ * `random` is a parameter rather than a direct `Math.random()` call so the function stays
+ * pure and a test can pin both outcomes.
  */
-export function chosenGangKind(seed: number): GangKind {
-    // A cheap deterministic mix. Not a hash for security, only for spreading adjacent
-    // node numbers apart — BitNodes 2 and 3 must not both fall the same way by accident.
-    const mixed = Math.abs(Math.sin(seed * 12.9898) * 43758.5453);
-    return mixed - Math.floor(mixed) < 0.5 ? "hacking" : "combat";
+export function chosenGangKind(random: () => number = Math.random): GangKind {
+    return random() < 0.5 ? "hacking" : "combat";
 }
 
 /**

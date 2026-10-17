@@ -341,7 +341,7 @@ export function tick(ns: NS, context: Context): void {
     // `passiveTasks` runs on every path, whoever holds the slot: backdoors,
     // augment purchases and donations never touch the activity slot, so gating
     // them on it would starve them whenever any work was running.
-    passiveTasks(ns, player, context.recent, canBuyAugs, context.capabilities.has("createGang"), context.capabilities.bitNode);
+    passiveTasks(ns, player, context.recent, canBuyAugs, context.capabilities.has("createGang"));
 
     // A Bladeburner black op owns the slot. Progression yields in both cases:
     //
@@ -406,7 +406,7 @@ export function tick(ns: NS, context: Context): void {
         return;
     }
 
-    const chosen = prioritizeAction(ns, player, context.goal, context.recent, canBuyAugs, context.capabilities.has("createGang"), context.capabilities.bitNode);
+    const chosen = prioritizeAction(ns, player, context.goal, context.recent, canBuyAugs, context.capabilities.has("createGang"));
     if (chosen === null) {
         reason = "nothing to do: the priority chain returned no action";
         return;
@@ -509,7 +509,6 @@ function prioritizeAction(
     recent: RecentLines,
     canBuyAugs: boolean,
     canCreateGang: boolean,
-    bitNode: number,
 ): PlayerAction | null {
     // 1. Backdoor faction servers
     const host = findBackdoor(ns, player);
@@ -555,7 +554,7 @@ function prioritizeAction(
     // prerequisite is met. What this step contributes is the CHOICE — without it the run
     // would drift toward whichever gang faction it happened to qualify for, and the
     // coin toss in `gangKindFor` would decide nothing.
-    const gangWant = gangTarget(ns, player, canCreateGang, bitNode);
+    const gangWant = gangTarget(ns, player, canCreateGang);
     if (gangWant !== null) {
         // Published so a permanent coin toss is not invisible. The kind cannot be changed
         // once the gang exists, so a run that went the wrong way should be legible in the
@@ -641,11 +640,11 @@ function prioritizeAction(
 
 /** Things that never touch the player's current action: backdoors, augment
  *  purchases and faction donations. */
-function passiveTasks(ns: NS, player: Player, recent: RecentLines, canBuyAugs: boolean, canCreateGang: boolean, bitNode: number): void {
+function passiveTasks(ns: NS, player: Player, recent: RecentLines, canBuyAugs: boolean, canCreateGang: boolean): void {
     const host = findBackdoor(ns, player);
     if (host) runBackdoor(ns, host);
 
-    tryCreateGang(ns, player, canCreateGang, bitNode);
+    tryCreateGang(ns, player, canCreateGang);
 
     const owned = ns.singularity.getOwnedAugmentations(true);
     if (canBuyAugs) buyAffordableAugments(ns, player, owned, recent);
@@ -676,8 +675,8 @@ function passiveTasks(ns: NS, player: Player, recent: RecentLines, canBuyAugs: b
  * cooldowns, and the checks above mean a failure here should be unreachable rather than
  * routine.
  */
-function tryCreateGang(ns: NS, player: Player, canCreateGang: boolean, bitNode: number): void {
-    const want = gangTarget(ns, player, canCreateGang, bitNode);
+function tryCreateGang(ns: NS, player: Player, canCreateGang: boolean): void {
+    const want = gangTarget(ns, player, canCreateGang);
     // `gangTarget` already answers "can a gang be created here", "are we in one" and
     // "which faction"; a null or an unheld faction means there is nothing to do yet.
     // `haveIt` false means step 2b is still working toward the membership.
@@ -1413,15 +1412,15 @@ function getGangFaction(ns: NS): FactionName | null {
  *
  * WRITES THE FLAG THE FIRST TIME IT IS ASKED. That is deliberate rather than a caller's
  * job: the choice has to be made exactly once, and the only place that can guarantee
- * "exactly once" is the place that reads it. Seeded from the BitNode so a lost flag is
- * recoverable to the same answer instead of becoming a second, contradictory decision —
- * see `chosenGangKind`.
+ * "exactly once" is the place that reads it. The draw is RANDOM PER RUN, not seeded by
+ * anything, so each BitNode plays a different kind of gang — see `chosenGangKind` for why
+ * a reproducible draw was tried first and abandoned.
  *
  * Returns null when the flag cannot be written, because a choice that will not persist
  * is worse than no choice: the next pass would flip again and the run would work toward
  * one kind of gang and then the other.
  */
-function gangKindFor(ns: NS, bitNode: number): GangKind | null {
+function gangKindFor(ns: NS): GangKind | null {
     if (ns.fileExists(GANG_CHOICE_FLAG, "home")) {
         const stored = ns.read(GANG_CHOICE_FLAG).trim();
         // A flag holding anything unexpected is treated as absent rather than trusted:
@@ -1429,7 +1428,8 @@ function gangKindFor(ns: NS, bitNode: number): GangKind | null {
         if (stored === "hacking" || stored === "combat") return stored;
     }
 
-    const kind = chosenGangKind(bitNode);
+    // Drawn per run, not seeded: this is a coin toss for the whole BitNode.
+    const kind = chosenGangKind();
     try {
         ns.write(GANG_CHOICE_FLAG, kind, "w");
     } catch {
@@ -1454,12 +1454,11 @@ function gangTarget(
     ns: NS,
     player: Player,
     canCreate: boolean,
-    bitNode: number,
 ): { faction: FactionName; haveIt: boolean } | null {
     if (!canCreate) return null;
     if (getGangFaction(ns) !== null) return null;
 
-    const kind = gangKindFor(ns, bitNode);
+    const kind = gangKindFor(ns);
     if (kind === null) return null;
 
     return gangFactionFor(kind, player.factions);
