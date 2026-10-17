@@ -38,7 +38,8 @@ const LABEL = 26;
 
 export function main(ns: NS): void {
     ns.disableLog("ALL");
-    ns.ui.openTail();
+    // No `openTail`: the report goes to a file (see the REPORTING section), and a tail
+    // window that stays empty reads as a script that failed to produce anything.
 
     const capabilities = detectCapabilities(ns);
 
@@ -320,7 +321,9 @@ export function main(ns: NS): void {
         reportDarknet(ns, context);
     }
 
-    announce(ns, "DOCTOR", "report complete");
+    // The report is buffered; this writes it and prints the two lines worth seeing in the
+    // terminal without opening the file.
+    finish(ns, capabilities.bitNode);
 }
 
 /**
@@ -416,15 +419,51 @@ function formatValue(ns: NS, key: SubGoalKey, value: number): string {
 /*
  * ─── REPORTING ───
  * A fixed-width layout is the difference between a report that is read and one
- * that is skimmed. `ns.print` writes to the tail window this script opened.
+ * that is skimmed.
+ *
+ * THE REPORT GOES TO A FILE, NOT THE TAIL WINDOW. It is ~45 lines across ten
+ * sections, which scrolls the single most useful part — the deployment and freshness
+ * lines near the top — off the screen the moment anything else prints. A tail window
+ * is also wiped by whatever runs next; the orchestrator clears its own log every pass,
+ * and this script shares a home directory with it.
+ *
+ * So the calls below ACCUMULATE and `finish` writes once. Every caller keeps the same
+ * `section`/`line` shape, which is why this is a change to two functions rather than to
+ * forty.
  */
 
+/** The report, in order, until `finish` writes it out. */
+const report: string[] = [];
+
+/** Where the report lands, on home. Reachable from the terminal and from file sync. */
+export const REPORT_FILE = "doctor_report.txt";
+
 function section(ns: NS, title: string): void {
-    ns.print(`\n── ${title} ${"─".repeat(Math.max(0, 40 - title.length))}`);
+    report.push(`\n── ${title} ${"─".repeat(Math.max(0, 40 - title.length))}`);
 }
 
 function line(ns: NS, label: string, value: string): void {
-    ns.print(`${label.padEnd(LABEL)}${value}`);
+    report.push(`${label.padEnd(LABEL)}${value}`);
+}
+
+/**
+ * Write the accumulated report and say where it went.
+ *
+ * A short summary reaches the terminal as well, because a script that prints nothing
+ * looks like it failed — and the two facts worth seeing without opening the file are
+ * whether the run is broken and whether its code is stale.
+ */
+function finish(ns: NS, bitNode: number): void {
+    const header = `Doctor report — BitNode ${bitNode}, ${new Date().toISOString()}`;
+    ns.write(REPORT_FILE, `${header}\n${report.join("\n")}\n`, "w");
+
+    const stale = report.find(l => l.includes("STALE"));
+    const broken = report.find(l => l.includes("scripts usable"));
+
+    ns.tprint(`DOCTOR: report written to ~/${REPORT_FILE} (${report.length} lines)`);
+    if (broken !== undefined) ns.tprint(`DOCTOR: ${broken.trim()}`);
+    if (stale !== undefined) ns.tprint(`DOCTOR: ${stale.trim()}`);
+    announce(ns, "DOCTOR", `report written to ~/${REPORT_FILE}`, stale === undefined ? "info" : "warn");
 }
 
 /**
