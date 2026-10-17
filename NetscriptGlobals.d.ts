@@ -58,6 +58,8 @@ declare global {
     type NodeStats = _NS.NodeStats;
     type SourceFileLvl = _NS.SourceFileLvl;
     type BladeburnerCurAction = _NS.BladeburnerCurAction;
+    type GangTaskNameEnumType = _NS.GangTaskNameEnumType;
+    type GangTaskName = _NS.GangTaskName;
     type GangGenInfo = _NS.GangGenInfo;
     type GangOtherInfoObject = _NS.GangOtherInfoObject;
     type GangTaskStats = _NS.GangTaskStats;
@@ -118,6 +120,7 @@ declare global {
     type DarknetResponseCode = _NS.DarknetResponseCode;
     type DarknetResult = _NS.DarknetResult;
     type CacheResult = _NS.CacheResult;
+    type CacheReward = _NS.CacheReward;
     type DarknetServerDetails = _NS.DarknetServerDetails;
     type HeartbleedOptions = _NS.HeartbleedOptions;
     type DarknetInstability = _NS.DarknetInstability;
@@ -214,6 +217,7 @@ declare global {
     type UserInterfaceTheme = _NS.UserInterfaceTheme;
     type IStyleSettings = _NS.IStyleSettings;
     type GameInfo = _NS.GameInfo;
+    type EditorOptions = _NS.EditorOptions;
     type AutocompleteData = _NS.AutocompleteData;
     type MoneyRequirement = _NS.MoneyRequirement;
     type SkillRequirement = _NS.SkillRequirement;

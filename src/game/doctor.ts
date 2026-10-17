@@ -85,6 +85,51 @@ export function main(ns: NS): void {
     }
     line(ns, "scripts usable", `${deployment.length - broken}/${deployment.length}`);
 
+    // ── Staleness ──
+    //
+    // PRESENCE AND COMPILABILITY ARE NOT ENOUGH. A file can be on home, compile, and
+    // still be an old version — which is what a run that never reloaded looks like from
+    // every other angle. Five fixes were committed against a run whose build stamp was
+    // two days older than the code, and nothing in the framework could say so.
+    //
+    // THE COMPARISON THAT WORKS is the RUNNING SCRIPT's age against the files' mtimes. A
+    // script keeps executing the copy it started with, so a file modified after the
+    // process started is not the code that process is running. An earlier version of this
+    // check compared feature mtimes against `nexus.ts`'s mtime instead, which is useless:
+    // file sync pushes everything in one pass, so every mtime is similar and it reported
+    // "current" on exactly the runs that were not.
+    const orchestrator = findScriptOnHome(ns, "nexus.ts");
+    const running = orchestrator === null ? null : findRunning(ns, orchestrator);
+
+    if (running === null) {
+        line(ns, "code freshness", "UNKNOWN (nexus.ts is not running)");
+    } else {
+        // Milliseconds since the process started, from the game rather than from a clock
+        // this script would have to keep.
+        const startedAt = Date.now() - running.onlineRunningTime * 1000;
+        const stale: string[] = [];
+        for (const path of deployment) {
+            const resolved = resolve(ns, path);
+            if (resolved === null) continue;
+            const modified = ns.getFileMetadata(resolved)?.mtime ?? 0;
+            // A file written after the process started is newer than the code it is
+            // running. Unreadable metadata reads as 0 and is never "newer", so a file this
+            // cannot see is not reported as stale.
+            if (modified > startedAt) stale.push(basename(path));
+        }
+        line(ns, "nexus running for", `${Math.round(running.onlineRunningTime / 60)} min`);
+        line(
+            ns,
+            "code freshness",
+            stale.length === 0
+                ? "current (nothing changed since the orchestrator started)"
+                : `STALE — ${stale.length} changed since it started: ${stale.slice(0, 4).join(", ")}${stale.length > 4 ? ", …" : ""}`,
+        );
+        if (stale.length > 0) {
+            line(ns, "", "restart with `run /nexus.ts` to load them");
+        }
+    }
+
     // One context for the rest of the report: the goal and the feature
     // decisions both read it, and deriving it twice would be two answers.
     const snapshot = createSnapshot(ns);
@@ -380,6 +425,28 @@ function section(ns: NS, title: string): void {
 
 function line(ns: NS, label: string, value: string): void {
     ns.print(`${label.padEnd(LABEL)}${value}`);
+}
+
+/**
+ * The running instance of a script, or null when it is not running.
+ *
+ * Used for the staleness check: `onlineRunningTime` is the only fact that answers "is the
+ * code this process is executing the code on disk", because a script keeps running the
+ * copy it started with. File mtimes alone cannot say — sync writes them all in one pass.
+ *
+ * `getRunningScript` takes a path that matches what the game reports, which may or may not
+ * carry a leading slash. Tried both rather than guessing.
+ */
+function findRunning(ns: NS, path: string): { onlineRunningTime: number } | null {
+    for (const candidate of [path, basename(path)]) {
+        try {
+            const info = ns.getRunningScript(candidate, "home");
+            if (info !== null && info !== undefined) return { onlineRunningTime: info.onlineRunningTime };
+        } catch {
+            // A path form the API does not accept. The other candidate may.
+        }
+    }
+    return null;
 }
 
 /*
