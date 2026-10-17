@@ -44,8 +44,15 @@ import { findScriptOnHome } from "../../../lib/scripts.ts";
 const WORM_NAME = "worm.ts";
 
 export async function main(ns: NS): Promise<void> {
-    const host = ns.args[0];
-    if (typeof host !== "string") return;
+    // The host defaults to the one this script is RUNNING ON, which is the only server a
+    // worker can legitimately be asked about.
+    //
+    // It used to require an argument and return silently without one, so `run worm.ts`
+    // by hand printed "script finished running" and nothing else — indistinguishable
+    // from a script that crashed, and it is the same silent-failure shape this file was
+    // written to remove. `ns.getHostname()` makes a manual run do the right thing rather
+    // than nothing.
+    const host = typeof ns.args[0] === "string" ? ns.args[0] : ns.getHostname();
 
     // A worker that dies before reporting is invisible, and that has cost real time on
     // this feature: an empty map reads exactly like a net with nothing in it, and a
@@ -77,10 +84,18 @@ export async function main(ns: NS): Promise<void> {
         // Reported rather than returning. A worker that exits here sends nothing, and
         // from the Master's side that is indistinguishable from a host with no
         // neighbours — the whole map stays at whatever it was, with no clue why.
-        note("probe", error instanceof Error ? error.message : String(error));
+        //
+        // TPRINT as well as the port: a person running this by hand is looking at the
+        // Terminal, and a worker that exits without a word is the failure this file
+        // exists to remove.
+        const detail = error instanceof Error ? error.message : String(error);
+        note("probe", detail);
+        ns.tprint(`[WORM] ${host}: probe failed — ${detail}`);
         sendReport(ns, { from: host, reachable, depth: -1, problems });
         return;
     }
+
+    ns.tprint(`[WORM] ${host}: ${reachable.length} neighbour(s)${reachable.length > 0 ? ` (${reachable.join(", ")})` : ""}`);
 
     let depth = -1;
     try {
@@ -116,6 +131,19 @@ export async function main(ns: NS): Promise<void> {
 
     const report: WormReport = { from: host, reachable, depth, opened, karmaLost, spread, problems };
     sendReport(ns, report);
+
+    // ALWAYS SAY SOMETHING before exiting.
+    //
+    // The port is how the Master hears; the Terminal is how a PERSON hears, and a worker
+    // started by hand has no Master to report to. This used to exit silently, which read
+    // as "script finished running" and nothing else — the same silent-failure shape the
+    // report channel was added to remove, one layer up.
+    ns.tprint(
+        `[WORM] ${host}: depth=${depth} neighbours=${reachable.length} spread=${spread.length}` +
+        ` caches=${opened} karma=${karmaLost}` +
+        (problems.length > 0 ? ` problems=${problems.length}` : ""),
+    );
+    for (const problem of problems) ns.tprint(`[WORM] ${host}: ${problem.step} — ${problem.detail}`);
 }
 
 /**
