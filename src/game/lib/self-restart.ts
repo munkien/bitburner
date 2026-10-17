@@ -33,15 +33,6 @@ import type { NS } from "@ns";
 const RESTART_DELAY_MS = 1_000;
 
 /**
- * The most files to watch.
- *
- * A bound rather than no limit: the walk runs once at boot and a runaway
- * enumeration would cost more than a missed file. The tree is around 60 files,
- * so this is comfortably above it.
- */
-const MAX_WATCHED = 400;
-
-/**
  * Watches this script's own file for changes.
  *
  * Constructed once at boot. If the fingerprint cannot be read the watcher is
@@ -108,6 +99,12 @@ export function createChangeWatcher(ns: NS): ChangeWatcher {
     };
 
     let fired = false;
+
+    // SAY WHAT IS BEING WATCHED, at startup. Coverage was previously invisible: the
+    // watcher could be covering the wrong tree, or a truncated one, and the only symptom
+    // was "nothing reloaded", which reads the same as "nothing changed". One line here
+    // turns that into something that can be checked rather than inferred.
+    ns.tprint(`INFO: watching ${boot.size} file(s) for changes under ${self.filename}`);
 
     return {
         enabled: () => true,
@@ -205,8 +202,19 @@ function firstChanged(ns: NS, boot: ReadonlyMap<string, number>): string | null 
  * so a new feature is watched when it lands, not when someone remembers to add
  * it here.
  *
- * Bounded by `MAX_WATCHED`: this runs once at boot and a runaway walk would
- * matter more than a missing file.
+ * Bounded by a VISITED SET rather than a file count.
+ *
+ * This was `MAX_WATCHED = 400`, justified as "a runaway enumeration would cost more than
+ * a missed file". That was wrong on both counts. It capped the wrong dimension: the walk
+ * has already paid for `ns.ls` on a directory by the time it decides whether to collect
+ * its files, so the cap saved almost no work. And it failed SILENTLY — a home holding
+ * more than 400 paths would stop collecting partway, leaving feature files unwatched
+ * while the watcher believed it covered the tree, which reads as "nothing changed".
+ *
+ * The real hazard is revisiting a directory, and there was no guard against it: if
+ * `ns.ls` ever returned a path leading back to one already walked, the queue would grow
+ * without bound. A visited set removes that possibility outright and cannot under-cover,
+ * because it limits repeats rather than coverage.
  *
  * Best-effort: an unreadable directory contributes nothing rather than throwing,
  * because a watcher that cannot enumerate everything should still watch what it
@@ -215,6 +223,8 @@ function firstChanged(ns: NS, boot: ReadonlyMap<string, number>): string | null 
 function discoverTree(ns: NS, entry: string): string[] {
     const root = entry.includes("/") ? entry.slice(0, entry.lastIndexOf("/")) : "";
     const files: string[] = [];
+    /** Directories already walked. A set, so a repeated path cannot loop the walk. */
+    const visited = new Set<string>();
     // `ns.ls` reports ABSOLUTE paths (see `lib/scripts.ts`), so the walk tracks
     // absolute directories and normalises what it reads — a bare name pushed onto
     // the queue would be looked up as if it were a root directory and silently
@@ -222,8 +232,10 @@ function discoverTree(ns: NS, entry: string): string[] {
     // feature file.
     const queue: string[] = [root === "" ? "/" : root];
 
-    while (queue.length > 0 && files.length < MAX_WATCHED) {
+    while (queue.length > 0) {
         const dir = queue.shift()!;
+        if (visited.has(dir)) continue;
+        visited.add(dir);
 
         let entries: string[];
         try {
