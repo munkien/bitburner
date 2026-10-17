@@ -33,6 +33,16 @@ import type { NS } from "@ns";
 const RESTART_DELAY_MS = 1_000;
 
 /**
+ * How many directories the tree walk may visit before it gives up.
+ *
+ * The framework is ~60 files in ~10 directories. This is far above that, and low enough
+ * that a home which has accumulated a very large number of paths cannot stall the walk.
+ * Exceeding it is REPORTED, not silent: a watcher covering part of the tree must say so,
+ * because its failure mode is indistinguishable from "nothing changed".
+ */
+const MAX_DIRECTORIES = 500;
+
+/**
  * Watches this script's own file for changes.
  *
  * Constructed once at boot. If the fingerprint cannot be read the watcher is
@@ -232,7 +242,26 @@ function discoverTree(ns: NS, entry: string): string[] {
     // feature file.
     const queue: string[] = [root === "" ? "/" : root];
 
+    // A DIRECTORY BUDGET, capping the WALK rather than the collection.
+    //
+    // A visited set stops a directory being walked twice, but not a HOME THAT IS SIMPLY
+    // LARGE: darknet servers, contract files and deployed scripts all live on home, so the
+    // walk visits every directory it finds. Removing the old file cap left this unbounded,
+    // and nexus stopped at boot inside this function — before its own "watching N files"
+    // line printed, which is how it was identified: everything after `announceRoster`
+    // vanished from the log while the features had already loaded.
+    //
+    // The old `MAX_WATCHED = 400` capped FILES, which saved no work because `ns.ls` had
+    // already run for the directory. This caps the number of `ns.ls` calls, which is the
+    // actual cost, and it is reported rather than silent.
+    let budgetExceeded = false;
+
     while (queue.length > 0) {
+        if (visited.size >= MAX_DIRECTORIES) {
+            budgetExceeded = true;
+            break;
+        }
+
         const dir = queue.shift()!;
         if (visited.has(dir)) continue;
         visited.add(dir);
@@ -256,6 +285,15 @@ function discoverTree(ns: NS, entry: string): string[] {
                 queue.push(path);
             }
         }
+    }
+
+    // A PARTIAL COVERAGE IS SAID OUT LOUD. The alternative is a watcher that reloads on
+    // some edits and not others, which reads exactly like "that edit did nothing".
+    if (budgetExceeded) {
+        ns.tprint(
+            `WARN: file watcher stopped after ${visited.size} directories — ` +
+            `only ${files.length} file(s) are being watched; restart manually after edits`,
+        );
     }
 
     // The entry first, so a change to it is reported ahead of a helper's.
