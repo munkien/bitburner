@@ -34,6 +34,26 @@ export interface Observation {
     /** What the game's orchestrator is doing, for the console. See `NexusState`. */
     nexus?: NexusState;
     /**
+     * The last few changes to the player's activity slot, oldest first.
+     *
+     * WHY THIS IS ON THE WIRE. "It keeps flipping on and off" was reported twice and neither
+     * recording could answer it: `player.work` is a 1 Hz SNAPSHOT, so a flip that starts and
+     * ends between samples leaves no trace, and the `ACTION` log tag records only that
+     * something changed, never what it changed from. This is the transition history the file
+     * needs for a flip to be a plain fact rather than a diff of 36,000 frames.
+     *
+     * Bounded and small. It rides on a payload published every second, and the shape of the
+     * last minute is the point — the JSONL recorder already holds every frame for detail.
+     */
+    activity?: readonly ActivityChange[];
+    /**
+     * Whether the run believes it is thrashing, and why.
+     *
+     * The run says so DURING the flip rather than leaving it to be found in a file
+     * afterwards. Absent when the slot is behaving, which is almost always.
+     */
+    flip?: ActivityFlip;
+    /**
      * Which BitNode the run is in, and when that node was entered.
      *
      * THE SERVER'S SESSION BOUNDARY. A recorded run is one BitNode: the goals, the
@@ -59,6 +79,35 @@ export interface BitNodeStamp {
     node: number;
     /** When this node was entered, in the game's clock. Not a timestamp we wrote. */
     installedAt: number;
+}
+
+/** One change of the player's activity slot. */
+export interface ActivityChange {
+    /** Milliseconds since the run started, matching every other `t` in a recording. */
+    readonly t: number;
+    /** The action the slot held before, e.g. `UNI:Rothman University:Computer Science`. */
+    readonly from: string;
+    /** The action it holds now. */
+    readonly to: string;
+    /** Hacking levels at the moment of the change, so progress either side is visible. */
+    readonly hacking: number;
+    /**
+     * Hacking experience at that moment.
+     *
+     * Carried because a LEVEL can be flat while experience climbs toward the next one, and
+     * "studying but gaining nothing" and "studying slowly" look identical without it.
+     */
+    readonly hackingExp: number;
+}
+
+/** A run that has been alternating between activities. */
+export interface ActivityFlip {
+    /** The two actions trading places. */
+    readonly pair: readonly [string, string];
+    /** How many times the slot changed inside the window. */
+    readonly changes: number;
+    /** The window, in milliseconds, that was examined. */
+    readonly windowMs: number;
 }
 
 /**

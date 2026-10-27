@@ -65,6 +65,42 @@ console.log(`  records   ${lines.length} (${telemetry.length} telemetry, ${logs.
 const last = lines[lines.length - 1];
 if (last) console.log(`  duration  ${duration(last.t)}`);
 
+/* ─── did the activity slot thrash, and did studying actually pay? ─── */
+
+// Both questions have been asked about this framework twice and neither could be
+// answered from a recording. `work` is a 1 Hz snapshot, so a flip shorter than a
+// second left no trace; and a level can hold flat while experience climbs toward the
+// next one, which makes "studying and gaining nothing" look the same as "studying
+// slowly". The game now reports `activity` and `flip`, so both are a plain fact here.
+const flips = telemetry.filter((s) => s.state?.flip);
+if (flips.length > 0) {
+    const firstAt = flips[0].t;
+    const lastAt = flips[flips.length - 1].t;
+    const { pair, changes } = flips[0].state.flip;
+    console.log('');
+    console.log('=== activity flips ===');
+    console.log(`  ${changes} changes in ${duration(flips[0].state.flip.windowMs)}, from ${duration(firstAt)} to ${duration(lastAt)}`);
+    console.log(`  ${pair.join('  <->  ')}`);
+}
+
+// Experience over time while a class was running. A rate near zero is the fault; a
+// level count alone cannot show it, because the level only moves at the boundary.
+const beganStudy = telemetry.filter((s) => s.state?.player?.work?.type === 'CLASS');
+if (beganStudy.length >= 2) {
+    const a = beganStudy[0].state.player;
+    const b = beganStudy[beganStudy.length - 1].state.player;
+    const seconds = (beganStudy[beganStudy.length - 1].t - beganStudy[0].t) / 1000;
+    if (seconds > 0) {
+        const exp = b.exp.hacking - a.exp.hacking;
+        const level = b.skills.hacking - a.skills.hacking;
+        console.log('');
+        console.log('=== while studying ===');
+        console.log(`  ${duration(seconds * 1000)} in class, ${beganStudy[0].state.player.work.what}`);
+        console.log(`  hacking  +${level} levels, +${Math.round(exp).toLocaleString()} exp`);
+        console.log(`  rate     ${(exp / seconds).toFixed(1)} exp/s (${(3600 * level / seconds).toFixed(1)} levels/hour)`);
+    }
+}
+
 /* ─── movement: did anything change, and where did it stop? ─── */
 
 if (telemetry.length >= 2) {

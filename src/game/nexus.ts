@@ -27,6 +27,7 @@ import {
 } from "./strategy.ts";
 import { drainMessages } from "./lib/messages.ts";
 import { createChangeWatcher, type ChangeWatcher } from "./lib/self-restart.ts";
+import { ActivityTrace, activityKey, detectFlip } from "./lib/activity-trace.ts";
 
 /*
  * ============================================================================
@@ -164,6 +165,11 @@ export async function main(ns: NS): Promise<void> {
     // One ring for the whole run. Created per pass it would be empty every time it
     // was read, since the features fill it after the pass begins.
     const recent = createRecent(ns);
+    // The activity history, and the clock every `t` in a recording is measured from. One
+    // trace for the run: it is the shape of the last few minutes that answers "is it
+    // flipping", which a per-pass object could never see.
+    const trace = new ActivityTrace();
+    const runStartedAt = Date.now();
     const runtime = createFeatureRuntime(ns);
 
     announceRoster(ns);
@@ -380,8 +386,22 @@ export async function main(ns: NS): Promise<void> {
             // here from the same `context` the dashboard uses, so the console
             // and the in-game panel cannot disagree.
             if (dueTelemetry) {
+                // What the slot holds NOW, which for a running action is not the same as what
+                // progression last asked for — a black op, a graft, or a class started by
+                // someone else all show up here and nowhere else.
+                const now = Date.now();
+                const activity = trace.observe(
+                    now - runStartedAt,
+                    { key: activityKey(readCurrentWork(ns)) },
+                    { hacking: context.snapshot.player.skills.hacking, hackingExp: context.snapshot.player.exp.hacking },
+                );
+                // Absent rather than null when the slot is behaving: the wire says "absent
+                // means fine", and a `null` in every frame would be a field a reader has to
+                // interpret rather than one they can ignore.
+                const flip = detectFlip(activity, now - runStartedAt) ?? undefined;
+
                 const published = await publish(
-                    sample(ns, describeNexus(context, runtime.status(), reserves))
+                    sample(ns, describeNexus(context, runtime.status(), reserves), { activity, flip })
                 );
                 if (!published) {
                     ns.tprint("WARN: telemetry publish failed — is the sync server running?");
@@ -410,6 +430,21 @@ export async function main(ns: NS): Promise<void> {
         }
 
         await ns.sleep(LOOP_MS);
+    }
+}
+
+/**
+ * The activity slot's contents, or undefined when the game will not say.
+ *
+ * Never throws. `getCurrentWork` needs the Singularity API, and a run without it must still
+ * publish telemetry — the history is a diagnostic, and a diagnostic that can stop the run
+ * reporting at all is worse than one that is occasionally missing.
+ */
+function readCurrentWork(ns: NS): unknown {
+    try {
+        return ns.singularity.getCurrentWork();
+    } catch {
+        return undefined;
     }
 }
 

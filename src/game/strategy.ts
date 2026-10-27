@@ -38,6 +38,26 @@ export interface TelemetryState {
     nexus?: NexusState;
     /** Which BitNode this run is in. See `BitNodeStamp` in `shared/types.ts`. */
     bitNode?: BitNodeStamp;
+    /** Recent activity transitions. See `ActivityChange` in `shared/types.ts`. */
+    activity?: readonly ActivityChange[];
+    /** Whether the run is thrashing, and why. See `ActivityFlip`. */
+    flip?: ActivityFlip;
+}
+
+/** One change of the player's activity slot, as the console reads it. */
+export interface ActivityChange {
+    t: number;
+    from: string;
+    to: string;
+    hacking: number;
+    hackingExp: number;
+}
+
+/** A run alternating between two activities. */
+export interface ActivityFlip {
+    pair: readonly [string, string];
+    changes: number;
+    windowMs: number;
 }
 
 /** Which BitNode the run is in, and when it was entered. */
@@ -256,7 +276,7 @@ export async function publish(state: TelemetryState): Promise<boolean> {
  * no decision here; it only reports what it sees. `nexus` is passed in by the
  * caller (the orchestrator), which is the only thing that knows its own state.
  */
-export function sample(ns: NS, nexus?: NexusState): TelemetryState {
+export function sample(ns: NS, nexus?: NexusState, history?: { activity?: readonly ActivityChange[]; flip?: ActivityFlip }): TelemetryState {
     return {
         at: Date.now(),
         player: projectPlayer(ns),
@@ -270,6 +290,12 @@ export function sample(ns: NS, nexus?: NexusState): TelemetryState {
         // when it entered this node, and this is what lets the server close a session on an
         // install instead of on a process restart. See `BitNodeStamp`.
         bitNode: sampleBitNode(ns),
+        // Passed in by the orchestrator, which is the only thing keeping a history. Absent
+        // fields rather than empty ones, so a game that does not track this publishes a
+        // payload with no `activity` key at all instead of an empty list a reader would have
+        // to interpret.
+        ...(history?.activity === undefined ? {} : { activity: history.activity }),
+        ...(history?.flip === undefined ? {} : { flip: history.flip }),
     };
 }
 
