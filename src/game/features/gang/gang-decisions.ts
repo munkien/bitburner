@@ -757,6 +757,14 @@ export interface WantedPressure {
     gainRate: number;
     /** How many members are working the wanted task right now. */
     cleaners: number;
+    /**
+     * What the BEST available cleaner removes per cycle, as a positive magnitude.
+     *
+     * The mean answers "what does the crew currently achieve"; this answers "what does one
+     * MORE member buy", which is the question a crew size is derived from. Zero when nobody
+     * can clean.
+     */
+    readonly bestCleanupRate: number;
     /** Mean cleanup one cleaner performs, as a POSITIVE magnitude. 0 if none can. */
     cleanupRate: number;
 }
@@ -802,6 +810,51 @@ export function averageCleanupRate(rates: readonly number[]): number {
         count++;
     }
     return count === 0 ? 0 : sum / count;
+}
+
+/**
+ * What the single best cleaner in the roster removes per cycle, as a magnitude.
+ *
+ * The counterpart to `averageCleanupRate`, and the two are not interchangeable. The mean
+ * describes a crew that has already been chosen; the maximum describes what choosing one
+ * more member achieves, which is what sizing a crew is about. Using the mean for the second
+ * question understates every member by the size of the gang — nine members with one strong
+ * cleaner report one ninth of that cleaner's rate — and a crew sized from it asks for more
+ * members than the gang has.
+ */
+export function bestCleanupRate(rates: readonly number[]): number {
+    let best = 0;
+    for (const r of rates) {
+        if (!Number.isFinite(r) || r >= 0) continue;
+        if (-r > best) best = -r;
+    }
+    return best;
+}
+
+/**
+ * How many members it takes to HOLD the wanted level, in any mode.
+ *
+ * THE FLOOR, as distinct from `wantedWorkersFor`. That one answers "how much of the gang
+ * should we spend on cleanup as a mode"; this answers "how many must be on it for the level
+ * not to rise", and it is asked in every mode because a rising level is never a good trade.
+ * See `wanted-hold.test.ts` for why that is a rule rather than a ranking.
+ *
+ * `risePerCleaner` is the BEST member's rate, not the mean. The mean over the whole gang is
+ * what the pressure line reports, and sizing from it is wrong in a way that hides itself: a
+ * gang of nine whose one capable cleaner removes 1.5 per cycle reports 0.17, so holding a
+ * rise of 3 appears to need 18 members — more than the gang has — and the level climbs with
+ * every member on cleanup. The question "what does one more cleaner buy" is answered by the
+ * member that would actually be sent, not by an average that includes members who would not.
+ *
+ * Zero is returned only when there is no rise to hold. A zero RATE is not zero members: a
+ * gang that cannot clean still sends one, because sending nobody is an explicit decision to
+ * let the level climb while looking like a considered one.
+ */
+export function wantedHoldWorkers(risePerCycle: number, risePerCleaner: number, total: number): number {
+    if (total <= 0) return 0;
+    if (!(risePerCycle > 0)) return 0;
+    if (!(risePerCleaner > 0)) return 1;
+    return Math.min(total, Math.max(1, Math.ceil(risePerCycle / risePerCleaner)));
 }
 
 /**
@@ -1082,6 +1135,12 @@ export function computeTrainerCap(
     mode: GangMode,
     c: GangConfig,
     prepWarfareTarget: number,
+    /**
+     * Members the wanted floor needs. Deducted from the budget, because a trainer is never
+     * re-assigned during the loop — so a cap sized without this can fill every slot and leave
+     * the crew that holds the wanted level with nobody to send. See `wantedHoldWorkers`.
+     */
+    wantedHoldCrew = 0,
 ): number {
     if (mode === "WARFARE_PREP") {
         // Prep trains harder than any other mode, and this is the ONLY place that is
@@ -1105,8 +1164,12 @@ export function computeTrainerCap(
         // earns while it prepares and one that does not, and prep is a short-lived mode that
         // should be spending nearly everything on ending itself.
         const fractionCap = Math.ceil(memberCount * c.prepTrainerFraction);
-        const reservedCap = memberCount - prepWarfareTarget - PREP_EARNERS_RESERVED;
+        const reservedCap = memberCount - prepWarfareTarget - PREP_EARNERS_RESERVED - wantedHoldCrew;
         return Math.max(0, Math.min(fractionCap, reservedCap));
     }
-    return Math.max(0, Math.ceil(memberCount * c.trainMaxFraction));
+    // The ordinary cap reserves the wanted floor the same way, for the same reason: the
+    // members holding the level are not available to train, so counting them as trainers
+    // would over-subscribe the roster.
+    const fractionCap = Math.ceil(memberCount * c.trainMaxFraction);
+    return Math.max(0, Math.min(fractionCap, memberCount - wantedHoldCrew));
 }

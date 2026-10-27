@@ -42,6 +42,54 @@ export interface TelemetryState {
     activity?: readonly ActivityChange[];
     /** Whether the run is thrashing, and why. See `ActivityFlip`. */
     flip?: ActivityFlip;
+    /** The gang's own state. See `GangState` in `shared/types.ts`. */
+    gang?: GangState;
+}
+
+/** The gang's wanted-level state, as the console reads it. */
+export interface GangWantedState {
+    level: number;
+    rate: number;
+    penalty: number;
+    cleaners: number;
+    each: number;
+    best: number;
+    holdCrew: number;
+}
+
+/** The gang's own state, published by the feature that acts on it. */
+export interface GangState {
+    members: number;
+    recruiting: boolean;
+    mode: string;
+    wanted: GangWantedState;
+}
+
+/**
+ * A reader for the gang's state, published by the gang feature.
+ *
+ * A PUBLISHER RATHER THAN A DIRECT READ, for the reason `publishTrainingRate` gives: this
+ * module must not import the gang feature, and the feature is the only thing that knows
+ * what it decided. One writer, one reader, no second derivation that could disagree.
+ *
+ * Null until the feature ticks, which is also what a run with no gang reports — the frame
+ * then simply has no `gang` field rather than an invented one.
+ */
+let gangState: (() => GangState | null) | null = null;
+
+/** Set once by the gang feature; passing null clears it (tests). */
+export function publishGangState(get: (() => GangState | null) | null): void {
+    gangState = get;
+}
+
+function readGangState(): GangState | null {
+    if (gangState === null) return null;
+    try {
+        return gangState();
+    } catch {
+        // Diagnostic state must never break the pass that reports it.
+        return null;
+    }
 }
 
 /** One change of the player's activity slot, as the console reads it. */
@@ -277,6 +325,7 @@ export async function publish(state: TelemetryState): Promise<boolean> {
  * caller (the orchestrator), which is the only thing that knows its own state.
  */
 export function sample(ns: NS, nexus?: NexusState, history?: { activity?: readonly ActivityChange[]; flip?: ActivityFlip }): TelemetryState {
+    const gang = readGangState();
     return {
         at: Date.now(),
         player: projectPlayer(ns),
@@ -296,6 +345,9 @@ export function sample(ns: NS, nexus?: NexusState, history?: { activity?: readon
         // to interpret.
         ...(history?.activity === undefined ? {} : { activity: history.activity }),
         ...(history?.flip === undefined ? {} : { flip: history.flip }),
+        // Absent when there is no gang, which is the honest reading rather than a gang of
+        // zeroes a reader would have to interpret.
+        ...(gang === null ? {} : { gang }),
     };
 }
 

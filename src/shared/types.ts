@@ -162,6 +162,47 @@ export interface WorkProjection {
 }
 
 /**
+ * The gang's own state, published so its decisions can be read rather than inferred.
+ *
+ * WHY THIS IS ON THE WIRE. The gang has been diagnosed three times from a pressure line
+ * that carried three numbers and no gang — `wanted=64.0%`, `rise=1/cycle`, `cleaners=0` —
+ * and each reading of it was a guess about which missing figure was the cause. A member
+ * count, the wanted level, and the crew the run CHOSE make the gap between "what the rule
+ * asks for" and "what the gang is doing" visible in one frame.
+ */
+export interface GangState {
+    readonly members: number;
+    /** Whether the gang is still growing, which overrides the money floor. */
+    readonly recruiting: boolean;
+    /** The mode the run chose for the gang this tick. */
+    readonly mode: string;
+    readonly wanted: GangWantedState;
+}
+
+/** The gang's wanted-level state, as the run sees it. */
+export interface GangWantedState {
+    /** The gang's wanted level, exactly as the game reports it. */
+    readonly level: number;
+    /** Net wanted level per cycle. Negative means the level is falling. */
+    readonly rate: number;
+    /** `respect / (respect + level)`. Multiplies everything the gang earns. */
+    readonly penalty: number;
+    /** Members currently on the wanted task. */
+    readonly cleaners: number;
+    /**
+     * Mean cleanup per member, as a magnitude.
+     *
+     * Over the WHOLE roster, which is why it looks small: nine members with one capable
+     * cleaner report one ninth of that cleaner's rate. Read `best` to size a crew.
+     */
+    readonly each: number;
+    /** What the BEST member removes per cycle — the figure a crew size is derived from. */
+    readonly best: number;
+    /** Members the floor requires on cleanup for the level not to rise. */
+    readonly holdCrew: number;
+}
+
+/**
  * The game's decision state, published so the console can show what the run is
  * doing rather than only raw player stats.
  *

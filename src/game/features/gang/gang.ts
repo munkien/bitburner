@@ -2,6 +2,7 @@ import { deriveGangConfig } from "./gang-config.ts";
 import { ChangeLog } from "../../lib/log.ts";
 import type { Context } from "../../lib/context.ts";
 import { targetFor } from "../../lib/objective.ts";
+import { publishGangState } from "../../strategy.ts";
 import {
     GANG_CONFIG_DEFAULT,
     TASK_TERRITORY,
@@ -15,6 +16,7 @@ import {
     economicModeByMember,
     economicModeFor,
     isEconomicTask,
+    bestCleanupRate,
     memberPower,
     pickTask,
     scoreTask,
@@ -24,6 +26,7 @@ import {
     skillScore,
     territoryLockHeld,
     trainingTask,
+    wantedHoldWorkers,
     wantedRise,
     wantedWorkerNeeded,
     wantedWorkersFor,
@@ -148,6 +151,12 @@ export function wantedPressureFor(
         cleanupRate: wantedTask === undefined
             ? 0
             : averageCleanupRate(members.map(m => gang.wantedGain(g, m, wantedTask))),
+        // The floor's figure: what ONE more cleaner removes, taken as the best member
+        // available rather than a mean over members who would not be sent. See
+        // `wantedHoldWorkers` for why the two must not be confused.
+        bestCleanupRate: wantedTask === undefined
+            ? 0
+            : bestCleanupRate(members.map(m => gang.wantedGain(g, m, wantedTask))),
     };
 }
 
@@ -436,12 +445,46 @@ export function tick(ns: NS, context: Context): void {
     // own state rather than from the size of last tick's crew. Shared with the doctor
     // so the reported crew and the assigned crew come from one measurement.
     const wantedPressure = wantedPressureFor(gang, g, members, specials);
+
+    // How many members the level needs to hold. Computed BEFORE the log line so the line can
+    // report the crew the run actually acts on — the mode-based figure and the floor are
+    // different numbers, and printing only the first is how the gap went unnoticed.
+    const wantedHoldCrew = wantedHoldWorkers(
+        wantedRise(wantedPressure),
+        wantedPressure.bestCleanupRate,
+        members.length,
+    );
+    const wantedHoldReason = wantedPressure.bestCleanupRate > 0
+        ? "wanted floor"
+        : "wanted floor (no cleaner can make progress)";
+
     log.change(
         "wanted-pressure", "WANTED-PRESSURE",
-        `rise=${fmt(wantedRise(wantedPressure))}/cycle crew=${wantedWorkersFor(g, wantedPressure, members.length, config, wantedEngaged)}`,
-        `rate=${fmt(g.wantedLevelGainRate)} cleaners=${wantedPressure.cleaners} ` +
-        `each=${fmt(wantedPressure.cleanupRate)}`,
+        `rise=${wantedRise(wantedPressure).toFixed(3)}/cycle hold=${wantedHoldCrew} ` +
+        `mode-crew=${wantedWorkersFor(g, wantedPressure, members.length, config, wantedEngaged)}`,
+        // THREE DECIMALS, not `fmt`'s whole numbers. `each=0` used to mean "below 0.5" and was
+        // read as "zero", which sent this diagnosis the wrong way for a whole session.
+        `level=${g.wantedLevel.toFixed(2)} rate=${g.wantedLevelGainRate.toFixed(3)} ` +
+        `cleaners=${wantedPressure.cleaners} each=${wantedPressure.cleanupRate.toFixed(3)} ` +
+        `best=${wantedPressure.bestCleanupRate.toFixed(3)}`,
     );
+
+    // Published for telemetry, so the gap between what the rule asks for and what the gang is
+    // doing is visible in the recording rather than inferred from a log line.
+    publishGangState(() => ({
+        members: members.length,
+        recruiting: config.recruitingPhase,
+        mode,
+        wanted: {
+            level: g.wantedLevel,
+            rate: g.wantedLevelGainRate,
+            penalty: g.wantedPenalty,
+            cleaners: wantedPressure.cleaners,
+            each: wantedPressure.cleanupRate,
+            best: wantedPressure.bestCleanupRate,
+            holdCrew: wantedHoldCrew,
+        },
+    }));
 
     const forceTrain = mode === "WARFARE_PREP";
     const suppressAscension = mode === "TERRITORY";
@@ -459,6 +502,10 @@ export function tick(ns: NS, context: Context): void {
         mode,
         config,
         prepWarfareTarget,
+        // The wanted floor takes its members out of the training budget. A trainer is never
+        // re-assigned in the loop below, so a cap that ignored the floor could fill every
+        // slot and leave the crew unfilled while the level climbed.
+        wantedHoldCrew,
     );
 
     refreshTrainers(
@@ -509,6 +556,7 @@ export function tick(ns: NS, context: Context): void {
     // not move when somebody else is sent to cleanup.
     const nonTrainers = sorted.filter(m => !activeTrainers.has(m.name));
     const economicMode = economicModeByMember(mode, nonTrainers, config);
+
     let wantedWorkers = 0;
     let territoryWorkers = 0;
     let prepWarfareAssigned = 0;
@@ -595,6 +643,26 @@ export function tick(ns: NS, context: Context): void {
         // this assigns the task without counting it again.
         if (m.name === standingTerritoryMember) {
             assign(m.name, specials.territory, "pinned territory");
+            continue;
+        }
+
+        // THE WANTED FLOOR, and it is deliberately not gated on the mode.
+        //
+        // A rising wanted level is never the right trade: the penalty multiplies every rate
+        // the gang has, so in MONEY it makes the money arrive more slowly, and at zero it
+        // stops arriving at all. This used to be a MODE, ranked against respect and money,
+        // which meant the runs that most needed cleanup — the poor ones — were the ones told
+        // to ignore it. The recordings show the result: `MODE: MONEY:below-money-floor ...
+        // wanted=64.0%` with `rise=1/cycle ... cleaners=0`, climbing while a full crew worked
+        // something else.
+        //
+        // So the crew is sized ONCE, above the loop, from the rise and the best cleaner —
+        // and members are taken in assignment order until the level is held. What the mode
+        // decides is now only whether cleanup gets MORE than the floor, which is what
+        // `wantedWorkersFor` sizes. The floor is a minimum, not a competing claim.
+        if (wantedHoldCrew > 0 && wantedWorkers < wantedHoldCrew) {
+            assign(m.name, specials.wanted, wantedHoldReason);
+            wantedWorkers++;
             continue;
         }
 

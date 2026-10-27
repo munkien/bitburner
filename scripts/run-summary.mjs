@@ -101,6 +101,32 @@ if (beganStudy.length >= 2) {
     }
 }
 
+/* ─── the gang: was the wanted level held, and who was holding it ─── */
+
+// The question this answers is not "what was the wanted level" but "did it rise, and if so
+// was the crew that should have held it actually assigned". Those are different faults and
+// they looked identical in the log line this replaced.
+const gangFrames = telemetry.filter((s) => s.state?.gang);
+if (gangFrames.length > 0) {
+    const first = gangFrames[0].state.gang;
+    const last = gangFrames[gangFrames.length - 1].state.gang;
+    console.log('');
+    console.log('=== gang ===');
+    console.log(`  members   ${last.members}${last.recruiting ? ' (recruiting)' : ''}   mode ${last.mode}`);
+
+    let rises = 0;
+    for (const s of gangFrames) if (s.state.gang.wanted.rate > 0) rises++;
+    console.log(`  wanted    ${first.wanted.level.toFixed(2)} -> ${last.wanted.level.toFixed(2)}  penalty ${(last.wanted.penalty * 100).toFixed(1)}%`);
+    console.log(`  rising    in ${rises} of ${gangFrames.length} frames`);
+    console.log(`  cleaners  ${last.wanted.cleaners} on the task, floor asks ${last.wanted.holdCrew}`);
+    console.log(`  each      mean ${last.wanted.each.toFixed(3)}, best ${last.wanted.best.toFixed(3)}`);
+
+    // The invariant, stated as a verdict rather than left to the reader.
+    console.log(rises === 0
+        ? '  verdict   held — the level never rose'
+        : `  verdict   ROSE in ${rises} frames — see the cleaners line above`);
+}
+
 /* ─── movement: did anything change, and where did it stop? ─── */
 
 if (telemetry.length >= 2) {
