@@ -29,8 +29,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { FACTION_REQUIREMENTS, deriveGoals, rankByTime, standingOf, type Goal, type PlayerStanding } from "./objective.ts";
-import type { Player } from "@ns";
+import { FACTION_REQUIREMENTS, MEGACORP_REQUIREMENTS, deriveGoals, rankByTime, standingOf, type Goal, type PlayerStanding } from "./objective.ts";
+import type { CompanyName, Player } from "@ns";
 
 /* ─── a standing, built from the fields the tests care about ─── */
 
@@ -60,6 +60,11 @@ function player(overrides: Partial<{ hacking: number; strength: number; defense:
 /** A standing with no gang and no reputation, which is what most tests want. */
 function standing(p: Player, homeCash = 0, netWorth = 0): PlayerStanding {
     return standingOf(p, 0, homeCash, 0, netWorth, null, []);
+}
+
+/** A standing with the given companies in the employment set. */
+function employedAt(p: Player, ...companies: string[]): PlayerStanding {
+    return standingOf(p, 0, 0, 0, 0, null, [], new Set(companies as CompanyName[]));
 }
 
 const head = (goals: readonly Goal[]): Goal => {
@@ -155,6 +160,55 @@ test("the faction requirement table agrees with the progression feature's copy",
     });
 });
 
+/* ─── megacorps: employment is not a threshold ─── */
+
+test("an unjoined megacorp is a goal gated on employment, not on a stat", () => {
+    // THE REGRESSION. Megacorps were absent from the requirement table entirely, so no
+    // goal ever named one, so `bestCompany` — the only code that could hire — was never
+    // the answer to anything. Every recorded run shows zero COMPANY actions.
+    const goals = deriveGoals(standing(player({ hacking: 500 })), new Set());
+    const eCorp = find(goals, "join ECorp");
+
+    assert.ok(eCorp !== undefined, "E Corp is not a goal at all, so nothing will ever hire for it");
+    assert.deepEqual(
+        eCorp.subGoals.map(sub => sub.key),
+        ["employed"],
+        "the megacorp goal carries something other than the employment requirement",
+    );
+    assert.equal(eCorp.subGoals[0]?.company, "ECorp", "the sub-goal does not name the company to apply to");
+});
+
+test("being employed satisfies the megacorp goal, whatever the skills are", () => {
+    // The point of the requirement. A player with NO hacking at all still closes the goal
+    // by holding the job, because the goal is employment and not a stat bar. Hiring is
+    // the game's own decision; this module only tracks whether it happened.
+    const goals = deriveGoals(employedAt(player({ hacking: 1 }), "ECorp"), new Set());
+    assert.equal(find(goals, "join ECorp"), undefined, "employment did not close the goal");
+});
+
+test("employment at one megacorp says nothing about another", () => {
+    // The employment set is per company, not a single boolean. A fixture that collapsed
+    // it would silently mark every megacorp as joined.
+    const goals = deriveGoals(employedAt(player({ hacking: 1 }), "ECorp"), new Set());
+    assert.ok(find(goals, "join MegaCorp") !== undefined, "employment at E Corp closed MegaCorp too");
+});
+
+test("the megacorp table does not list a faction that is not one", () => {
+    // `Fulcrum Technologies` is a COMPANY, while the faction is `Fulcrum Secret
+    // Technologies` — gated on The Covenant rather than on employment, so it does not
+    // belong here. The TypeScript compiler catches a wrong FactionName; this catches the
+    // opposite mistake, a table that has quietly stopped covering the real megacorps.
+    const expected = [
+        "ECorp", "MegaCorp", "KuaiGong International", "Four Sigma", "NWO",
+        "Blade Industries", "OmniTek Incorporated", "Bachman & Associates",
+        "Clarke Incorporated",
+    ];
+    assert.deepEqual(Object.keys(MEGACORP_REQUIREMENTS).sort(), expected.sort());
+    for (const [faction, req] of Object.entries(MEGACORP_REQUIREMENTS)) {
+        assert.equal(req.employedBy, faction, `${faction}: the company to be employed by is not itself`);
+    }
+});
+
 /* ─── ranking by time ─── */
 
 test("a goal needing an untrained stat is ordered after one that is measurable", () => {
@@ -209,4 +263,101 @@ test("among measurable goals, the soonest comes first", () => {
     for (let i = 1; i < timed.length; i++) {
         assert.ok(timed[i]! >= timed[i - 1]!, "measurable goals are not in ascending time order");
     }
+});
+
+/* ─── keeping the goal the run is working on ─── */
+
+/**
+ * A standing where two goal rankings are one purchase apart, and both are in the top two.
+ *
+ * THIS IS THE SHAPE OF THE RECORDED FLICKER. Several factions ask for DIFFERENT cash balances
+ * out of the SAME balance, so one gig, one program or one augmentation re-orders them. In
+ * `runs/2026-10-26T05.26.43.876Z.jsonl` frames 535-543, `join Aevum` reads 47.51%, 50.04%,
+ * 47.56% as the balance goes 19.0m, 20.0m, 19.0m.
+ *
+ * At hacking 40 with 20m cash, `join CyberSec` and `join Tian Di Hui` have byte-identical
+ * requirements and read 80% each, so they sit 1st and 2nd and the sort's name tiebreak decides
+ * between them. That tiebreak is a decision the RUN should be able to keep, which is what the
+ * hold is for.
+ */
+function atACashBoundary(cash: number): Goal[] {
+    return deriveGoals(standing(player({ hacking: 40, money: cash })), new Set());
+}
+
+/** The goal of that name, asserted present so a fixture change fails loudly. */
+function named(goals: readonly Goal[], name: string): Goal {
+    const found = goals.find(g => g.goal === name);
+    assert.ok(found !== undefined, `expected the ${name} goal`);
+    return found;
+}
+
+test("the goal the run is working on keeps the head through a spend", () => {
+    // THE FLICKER, as a test. Two cash goals, one purchase apart. Nothing about either goal
+    // changed — only the working balance did — so the head must not move off the goal the run
+    // is already on.
+    const goals = atACashBoundary(20_000_000);
+    const plain = rankByTime(goals, () => null);
+    assert.equal(plain[0]?.goal, "join CyberSec", "the fixture no longer ranks CyberSec first");
+    assert.equal(plain[1]?.goal, "join Tian Di Hui", "the swap is a 1st/2nd exchange");
+
+    // The run is on the SECOND of the pair. Without the hold the ranking keeps the first,
+    // which is how the pair take turns — the exchange the hold exists to stop.
+    assert.equal(
+        rankByTime(goals, () => null, { working: named(goals, "join Tian Di Hui") })[0]?.goal,
+        "join Tian Di Hui",
+        "a spend moved the head off the goal the run was working on",
+    );
+});
+
+test("the working goal is not defended further than second place", () => {
+    // The hold is for the exchange, not for the run: a goal the ranking has pushed behind a
+    // THIRD goal has been beaten for a reason, and the run follows the ranking.
+    const goals = atACashBoundary(20_000_000);
+    const plain = rankByTime(goals, () => null);
+    // `join Volhaven` is third here: it has to be ahead of the working goal for the fixture to
+    // mean anything, so the working goal is taken from the back where no exchange applies.
+    assert.equal(plain[2]?.goal, "join Volhaven", "the fixture no longer has Volhaven third");
+    const tail = plain[plain.length - 1]!;
+    assert.deepEqual(
+        rankByTime(goals, () => null, { working: tail }).map(g => g.goal),
+        plain.map(g => g.goal),
+        "a goal the run is not on was promoted by the hold",
+    );
+});
+
+test("a goal already at the head is not defended by the hold", () => {
+    const goals = atACashBoundary(20_000_000);
+    assert.deepEqual(
+        rankByTime(goals, () => null, { working: named(goals, "join CyberSec") }).map(g => g.goal),
+        rankByTime(goals, () => null).map(g => g.goal),
+    );
+});
+
+test("the hold releases once the goal it protects is satisfied or gone", () => {
+    // A working goal that is no longer derived — satisfied, or a faction joined — must not
+    // pin the ranking to nothing. The hold is a preference among the goals that EXIST, and a
+    // satisfied goal is removed from the list rather than reported as `done`.
+    const goals = atACashBoundary(20_000_000);
+    const gone: Goal = { ...named(goals, "join CyberSec"), goal: "join A Faction That No Longer Exists" };
+    assert.equal(goals.find(g => g.goal === gone.goal), undefined, "the goal is not actually absent");
+    assert.deepEqual(
+        rankByTime(goals, () => null, { working: gone }).map(g => g.goal),
+        rankByTime(goals, () => null).map(g => g.goal),
+    );
+});
+
+
+test("a real handover between timed goals still happens", () => {
+    // The hold must not become a veto. When BOTH goals can be timed, the ranking is comparing
+    // how long they take, and a purchase does not move that — so a sooner goal taking the head
+    // is a decision, not a flicker, and the hold does not stand in its way.
+    const goals = deriveGoals(standing(player({ hacking: 100 })), new Set());
+    const niteSec = goals.find(g => g.goal === "join NiteSec");
+    const bitRunners = goals.find(g => g.goal === "join BitRunners");
+    assert.ok(niteSec !== undefined && bitRunners !== undefined);
+
+    // BitRunners needs 500 hacking against NiteSec's 200, so at a flat rate it is later: the
+    // ranking puts NiteSec first, and holding BitRunners must not change that.
+    const ordered = rankByTime(goals, () => 1, { working: bitRunners });
+    assert.equal(ordered[0]?.goal, "join NiteSec", "the hold vetoed a handover between two timed goals");
 });

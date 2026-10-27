@@ -14,7 +14,8 @@ import { createFeatureRuntime, type FeatureStatus } from "./lib/feature-runtime.
 import { announce, readStatuses } from "./lib/log.ts";
 import { currentGoal, preferGoal, type Goal, type SubGoalKey } from "./lib/objective.ts";
 import { measuredRateFor } from "./features/player/activity.ts";
-import { FEATURES, featureParticipation } from "./lib/registry.ts";
+import { featureParticipation, featuresInOrder } from "./lib/registry.ts";
+import { stallClock } from "./features/retire/retire.ts";
 import {
     sample,
     publish,
@@ -200,6 +201,13 @@ export async function main(ns: NS): Promise<void> {
     // survives a poll with nothing pending, and applied as a floor each pass.
     let nudge: Command | null = null;
 
+    // The goal the previous pass put at the head, so this pass's ranking can keep it instead
+    // of trading it away on a purchase. Held HERE and not in the goal machinery, because that
+    // is pure derivation and this is memory — the loop is the only thing that has any. See
+    // `WorkingGoal`: without it the head follows the working balance, and the recorded runs
+    // show it changing 30-110 times an hour for no reason but a gig being paid for.
+    let working: Goal | null = null;
+
     while (true) {
         // Clear the trap every pass. If the process dies mid-pass, the atExit hook
         // writes whatever happened to be there — so an ordinary stop records its reason,
@@ -298,8 +306,14 @@ export async function main(ns: NS): Promise<void> {
                 snapshot,
                 featureParticipation(),
                 measuredRateFor,
+                // The goal the run is already on. NOT consulted when the operator has named a
+                // measurement: they have said what to work on, and keeping the previous goal
+                // against that would make the command look ignored. A satisfied goal is gone
+                // from `derived` by now, which is how a handover is supposed to happen.
+                nudge?.goal === undefined ? { working: working ?? undefined } : {},
             );
             const goals = preferGoal(derived, nudge?.goal as SubGoalKey | undefined);
+            working = currentGoal(goals);
 
             const context: Context = {
                 capabilities,
@@ -309,6 +323,11 @@ export async function main(ns: NS): Promise<void> {
                 goals,
                 goal: currentGoal(goals),
                 recent,
+                // Read from the feature's own module state, AFTER the previous pass's
+                // tick. One pass behind, deliberately: the clock is armed by a tick, and a
+                // figure read before the tick that sets it would report a timer that is
+                // already running as not yet started.
+                stall: stallClock(),
                 multipliers: createContextReader(ns, capabilities),
             };
 
@@ -530,10 +549,15 @@ function describeGoal(ns: NS, goal: Goal): string {
  * boot is right for that channel; a line per feature per PASS is what was wrong.
  */
 function announceRoster(ns: NS): void {
-    ns.tprint(`INFO: ${FEATURES.length} features registered, in priority order:`);
-    for (const meta of FEATURES) {
+    // IN THE ORDER THIS NODE ACTUALLY RUNS THEM, which is the whole reason priority became
+    // a function of the BitNode: in Hacktocracy the printed list is a different list, and a
+    // log showing the default order would be describing a run that is not happening.
+    const bitNode = detectCapabilities(ns).bitNode;
+    const order = featuresInOrder(bitNode);
+    ns.tprint(`INFO: ${order.length} features registered, in priority order:`);
+    for (const meta of order) {
         const needs = meta.requires.length > 0 ? ` — needs ${meta.requires.join(", ")}` : "";
-        ns.tprint(`INFO:   ${String(meta.priority).padStart(4)}  ${meta.name}${needs}`);
+        ns.tprint(`INFO:   ${String(meta.priority(bitNode)).padStart(4)}  ${meta.name}${needs}`);
     }
 }
 
@@ -614,6 +638,11 @@ function describeNexus(
             movable: [...state.meta.movable],
         })),
         reserves: { cash: reserves.cash, homeRamGb: reserves.homeRamGb },
+        // Spread rather than assigned, so an absent clock is an ABSENT FIELD and not a
+        // `null` the UI has to distinguish from "waiting". The two states the console
+        // must not confuse are "no clock" and "clock about to expire", and leaving the
+        // field off is the one encoding that cannot be misread.
+        ...(context.stall ? { stall: context.stall } : {}),
     };
 }
 

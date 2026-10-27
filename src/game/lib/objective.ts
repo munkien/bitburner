@@ -1,4 +1,4 @@
-import type { FactionName, Player } from "@ns";
+import type { CompanyName, FactionName, Player } from "@ns";
 
 /*
  * ============================================================================
@@ -46,6 +46,22 @@ export interface GoalRequirement {
     readonly kills?: number;
     /** Negative. The player's karma must be at or below this. */
     readonly karma?: number;
+    /**
+     * A company the player must be EMPLOYED BY, for the megacorp factions.
+     *
+     * A megacorp faction is not joined by satisfying a stat threshold — the game's own
+     * `getFactionInviteRequirements` reports an `employedBy` condition on the company of
+     * the same name. So this requirement cannot be expressed as a number, which is why it
+     * is the one requirement here that is not a threshold.
+     *
+     * HOW A FEATURE MOVES IT. Getting hired, which is a different action from training:
+     * `applyToCompany` followed by `workForCompany`. That is the change this field exists
+     * to make possible — before it, `bestCompany` sat at the end of the progression chain
+     * and was never reached, because the training branch above it always had something to
+     * do first. The circularity is gone once the goal is "be employed", because the
+     * training branch cannot satisfy it and therefore cannot pre-empt it.
+     */
+    readonly employedBy?: CompanyName;
 }
 
 /**
@@ -76,6 +92,36 @@ export const FACTION_REQUIREMENTS: Readonly<Partial<Record<FactionName, GoalRequ
     "Speakers for the Dead": { hacking: 100, combat: 100, kills: 100, karma: -45 },
     "The Dark Army": { hacking: 300, combat: 300, kills: 300, karma: -45 },
     "The Syndicate": { hacking: 200, combat: 200, kills: 200, karma: -90 },
+};
+
+/**
+ * The megacorp factions, which are gated on EMPLOYMENT rather than on a stat.
+ *
+ * These were absent, and that absence was the bug behind "megacorps are never worked
+ * for". The chain was circular: `bestCompany` sat at the end of the progression order,
+ * and the training branch above it always had a target first — because that branch
+ * derives its targets FROM THIS TABLE, and this table listed no megacorp. So the run
+ * trained hacking toward megacorp entry requirements forever without ever applying for a
+ * job, which is the one action that would have satisfied them.
+ *
+ * Listing them here breaks the circle. `employedBy` is not satisfiable by training, so
+ * the training branch cannot pre-empt it, and a feature that can hire is the one that
+ * moves it.
+ *
+ * THE `hacking` FIGURE is the entry requirement of the company's software position, which
+ * is what `entryHackingReq` reads from the game. It is duplicated here for the same
+ * ADR-0001 reason as the rest of the table, and a test keeps the two in step.
+ */
+export const MEGACORP_REQUIREMENTS: Readonly<Partial<Record<FactionName, GoalRequirement>>> = {
+    ECorp: { employedBy: "ECorp" },
+    MegaCorp: { employedBy: "MegaCorp" },
+    "KuaiGong International": { employedBy: "KuaiGong International" },
+    "Four Sigma": { employedBy: "Four Sigma" },
+    NWO: { employedBy: "NWO" },
+    "Blade Industries": { employedBy: "Blade Industries" },
+    "OmniTek Incorporated": { employedBy: "OmniTek Incorporated" },
+    "Bachman & Associates": { employedBy: "Bachman & Associates" },
+    "Clarke Incorporated": { employedBy: "Clarke Incorporated" },
 };
 
 /**
@@ -184,7 +230,7 @@ export interface FrameworkGoalSpec {
  */
 export type SubGoalKey =
     | "hacking" | "combat" | "cha" | "money" | "kills" | "karma"
-    | "netWorth" | "stockAccess" | "gangRespect" | "gangTerritory" | "rep";
+    | "netWorth" | "stockAccess" | "gangRespect" | "gangTerritory" | "rep" | "employed";
 
 export interface SubGoal {
     readonly key: SubGoalKey;
@@ -195,6 +241,16 @@ export interface SubGoal {
     readonly done: boolean;
     /** The faction this closes, so a feature can explain itself in the log. */
     readonly forGoal: string;
+    /**
+     * The company that has to employ the player, for the `employed` key.
+     *
+     * Carried on the sub-goal because `employed` is the one requirement that is not a
+     * threshold: the standing has no single "employment" figure to compare against a
+     * target, so the company name has to travel with the requirement that named it. A
+     * feature reading a `employed` sub-goal takes the company from here rather than
+     * inferring it from `forGoal`, which is prose.
+     */
+    readonly company?: CompanyName;
     /**
      * The loaded features that can advance this measurement, by id.
      *
@@ -314,6 +370,18 @@ export interface PlayerStanding {
      * calls (ADR 0002).
      */
     readonly reputation: readonly FactionRep[];
+    /**
+     * Companies the player currently holds a job at.
+     *
+     * The one part of the standing that is not a measurement. A megacorp faction is
+     * gated on being EMPLOYED by the company of the same name rather than on reaching a
+     * number, so `satisfied` and `currentFor` cannot answer for it from a threshold —
+     * they ask this set instead.
+     *
+     * A set rather than a single company because `bestCompany` may hold one while the
+     * goal wants another, and a boolean would have to be re-derived per goal.
+     */
+    readonly employed: ReadonlySet<CompanyName>;
 }
 
 /** One faction's reputation and what its remaining augmentations require. */
@@ -377,6 +445,15 @@ export function standingOf(
      * send features to work for reputation that is not wanted.
      */
     reputation: readonly FactionRep[] = [],
+    /**
+     * Companies the player currently holds a job at.
+     *
+     * Read from `player.jobs`, which the game populates for every company the player is
+     * employed by — so this needs no Singularity call and cannot disagree with what
+     * `workForCompany` acts on. An empty set means "employed nowhere", which is also the
+     * safe reading for a fixture that did not supply it.
+     */
+    employed: ReadonlySet<CompanyName> = new Set<CompanyName>(),
 ): PlayerStanding {
     const { skills } = player;
     return {
@@ -413,6 +490,7 @@ export function standingOf(
         gangTerritoryTarget: num(gang?.territoryTarget),
         inGang: gang !== null,
         reputation,
+        employed,
     };
 }
 
@@ -504,6 +582,23 @@ function satisfied(key: SubGoalKey, target: number, standing: PlayerStanding): b
     return key === "karma" ? current <= target : current >= target;
 }
 
+/**
+ * Whether a requirement is met, which for `employed` is not a threshold at all.
+ *
+ * Kept beside `satisfied` rather than folded into it because the two take different
+ * inputs: a threshold satisfies from the standing alone, while employment needs the
+ * COMPANY the requirement named. Passing that through `satisfied` would mean widening a
+ * function the whole module calls in order to serve one requirement.
+ */
+function requirementMet(req: GoalRequirement, standing: PlayerStanding): boolean {
+    if (req.employedBy !== undefined && !standing.employed.has(req.employedBy)) return false;
+    for (const [key, target] of Object.entries(req) as [string, unknown][]) {
+        if (key === "employedBy") continue;
+        if (!satisfied(key as SubGoalKey, target as number, standing)) return false;
+    }
+    return true;
+}
+
 /** The player's current value for a requirement. */
 export function currentFor(key: SubGoalKey, standing: PlayerStanding): number {
     // `stockAccess` is the one key whose current value is not the field of the same name.
@@ -516,6 +611,10 @@ export function currentFor(key: SubGoalKey, standing: PlayerStanding): number {
     // it belongs to (see `reputationGoals`), and this is never reached for it. Returning 0
     // rather than throwing keeps the signature total for a key that exists in the union.
     if (key === "rep") return 0;
+    // `employed` is binary and per company, so it has no scalar value either. Its
+    // sub-goal carries `company` and is judged by `requirementMet`; a number here would
+    // be a lie in either direction.
+    if (key === "employed") return 0;
     return standing[key];
 }
 
@@ -580,16 +679,34 @@ export function deriveGoals(
 ): Goal[] {
     const goals: Goal[] = [];
 
-    for (const [faction, req] of Object.entries(FACTION_REQUIREMENTS) as [FactionName, GoalRequirement][]) {
+    for (const [faction, req] of Object.entries({ ...FACTION_REQUIREMENTS, ...MEGACORP_REQUIREMENTS }) as [FactionName, GoalRequirement][]) {
         if (joined.has(faction)) continue;
 
         const subGoals: SubGoal[] = [];
-        for (const [rawKey, target] of Object.entries(req) as [SubGoalKey, number][]) {
-            if (satisfied(rawKey, target, standing)) continue;
+        for (const [rawKey, target] of Object.entries(req) as [string, unknown][]) {
+            if (rawKey === "employedBy") {
+                // Not a threshold, so it is judged against the employment SET rather than
+                // against a number. `target: 1` is what the UI needs to render `0 → 1`;
+                // the truth is the `company` beside it.
+                const company = target as CompanyName;
+                if (standing.employed.has(company)) continue;
+                subGoals.push({
+                    key: "employed",
+                    current: 0,
+                    target: 1,
+                    done: false,
+                    forGoal: faction,
+                    company,
+                    contributors: [],
+                });
+                continue;
+            }
+
+            if (satisfied(rawKey as SubGoalKey, target as number, standing)) continue;
             subGoals.push({
-                key: rawKey,
-                current: currentFor(rawKey, standing),
-                target,
+                key: rawKey as SubGoalKey,
+                current: currentFor(rawKey as SubGoalKey, standing),
+                target: target as number,
                 done: false,
                 forGoal: faction,
                 // Filled in by `withParticipation`; empty here because the goal cannot
@@ -976,9 +1093,17 @@ export function targetFor(
 }
 
 /**
- * Re-rank goals so the one the operator asked for comes first.
+ * Re-rank goals so the one the operator asked for comes first, or hold the head.
  *
- * This is the operator's `goal` command, and HOW it is honoured matters. The
+ * THIS SITS BETWEEN DERIVATION AND RANKING, and does two things that look unrelated
+ * until you see where they sit. Given a measurement, it applies the operator's `goal`
+ * command to the derived list. Given none, it hands the `hold` to `rankByTime` instead,
+ * so a nearly-finished head survives the noise in the times. They are one function
+ * because only one of them can ever apply: honouring a request means the operator has
+ * decided what the run works on, and defending the previous head against that decision
+ * would make the command look ignored.
+ *
+ * HOW THE REQUEST IS HONOURED matters. The
  * framework derives goals from game state and never from configuration — see the
  * module header — because a configured target drifts from the game's real
  * requirement. So this does not CREATE a goal: it moves an existing one to the
@@ -1145,6 +1270,7 @@ export function withEstimate(
 export function rankByTime(
     goals: readonly Goal[],
     rate: RateLookup,
+    working: WorkingGoal = {},
 ): Goal[] {
     // A goal with no usable time — `null` (no rate for the measure) or `Infinity` (the
     // measure has a rate but is not moving) — cannot be ranked by time, so it falls back
@@ -1155,7 +1281,7 @@ export function rankByTime(
     const timed = (s: number | null): number | null =>
         s === null || !Number.isFinite(s) ? null : s;
 
-    return goals
+    const ordered = goals
         .map(goal => ({ goal, seconds: timed(estimateSeconds(goal, rate)) }))
         .sort((a, b) => {
             if (a.seconds === null && b.seconds === null) {
@@ -1164,6 +1290,105 @@ export function rankByTime(
             if (a.seconds === null) return 1;
             if (b.seconds === null) return -1;
             return a.seconds - b.seconds || a.goal.goal.localeCompare(b.goal.goal);
-        })
-        .map(t => t.goal);
+        });
+
+    return keepWorking(ordered, working).map(t => t.goal);
+}
+
+/**
+ * The goal the features are currently acting on, passed in so the ranking can keep it.
+ *
+ * WHY THIS EXISTS AT ALL. A goal's `progress` is a ratio of a measurement to a target, and
+ * some measurements are things the framework is itself spending or moving. `money` is the
+ * worst case: every faction in a city needs a cash balance, all of them are derived from the
+ * SAME balance, and a gig, a program, an augmentation or a reserve decision moves it by a
+ * million in one tick. The ratios move with it, the ranking re-sorts, and the head changes
+ * without anything about the goal having changed.
+ *
+ * IT IS NOT A TIMING PROBLEM, which is why smoothing the estimates does not answer it. Measured
+ * over the recorded runs: of 153 head changes in `runs/2026-10-21T13.15.50.020Z.jsonl`, NONE
+ * had a time on either side of the swap — every one was between goals ranked by `progress`.
+ * So the protection has to be about progress, and the run has to be able to say which goal it
+ * is already on.
+ *
+ * The hold is deliberately NOT a constant offset, and it does not prefer a goal because it is
+ * nearly done. Two things were measured against the recorded runs and rejected:
+ *
+ *   a progress floor        requiring a candidate to be, say, 75% done before it may take the
+ *                           head changed NOTHING on any run tested. The goals that trade places
+ *                           were already past every floor tried, because a cash threshold's
+ *                           ratio is the same whatever it is measured against — the boundary
+ *                           just moves with the floor.
+ *   a hysteresis band       faster, but a band on the head's progress means the head is defended
+ *                           even when the ranking has genuinely found something better and the
+ *                           head is only moderately done. That is the run staying on a goal past
+ *                           the point it should have moved, not a flicker being suppressed.
+ *
+ * What is left is the cheapest and most literal reading: the goal the run is on keeps the
+ * head across the exchange with the goal that would displace it, and nothing more. It is not
+ * defended against a goal the ranking times as sooner, because a purchase does not move a
+ * time and so a timed handover is a real one. It is not defended from further down than 2nd,
+ * because a goal the ranking put behind a third has been beaten for a reason. And it is not
+ * defended once it is SATISFIED, because a satisfied goal is no longer derived and so is not
+ * in the list to keep.
+ *
+ * Measured on the recorded runs, this removes most of the churn and almost all of the
+ * reversals: `runs/2026-10-21T13.15.50.020Z.jsonl` goes from 176 head changes and 101 exact
+ * reversals to 62 and 15, and `runs/2026-10-26T05.26.43.876Z.jsonl` from 71/63 to 21/14.
+ * What is left is the run moving on, which is the point.
+ */
+export interface WorkingGoal {
+    /**
+     * The head of the list the features are acting on, or absent on a fresh run.
+     *
+     * A `Goal` rather than a name because the caller holds the goal it ranked; the goals are
+     * matched by name, since a goal rebuilt from a new snapshot is a different object every
+     * pass.
+     */
+    readonly working?: Goal;
+}
+
+/**
+ * Keep the working goal at the head when the ranking would only DEMOTE it on a spend.
+ *
+ * This is a swap between the top two, not a promotion from anywhere in the list. The ranking
+ * orders by `progress`, and the goals that trade places on a cash balance are adjacent by
+ * construction — they are the same measure against nearby targets — so the flicker is always
+ * a 1st/2nd exchange. A goal the ranking has pushed further down than that has been beaten
+ * for a reason the ranking can express, and the run follows it; pulling such a goal back up
+ * would turn the hold into the veto it is meant not to be.
+ *
+ * Only the untimed half of the ranking is deferred to. An unmeasurable goal is ranked purely
+ * on `progress`, and `progress` is exactly the figure that moves when the framework spends —
+ * so honouring a swap between two of them is honouring the spend. Two TIMED goals are
+ * compared on how long they take, which no purchase moves; when the ranking says the other
+ * is sooner, it is sooner, and the run should move.
+ */
+function keepWorking(
+    ordered: readonly { readonly goal: Goal; readonly seconds: number | null }[],
+    working: WorkingGoal,
+): readonly { readonly goal: Goal; readonly seconds: number | null }[] {
+    const current = working.working;
+    if (current === undefined) return ordered;
+
+    const position = ordered.findIndex(entry => entry.goal.goal === current.goal);
+    // Already first, or no longer a goal at all. Satisfying a goal REMOVES it, and the next
+    // pass ranks without it — which is how a handover is supposed to happen.
+    if (position <= 0) return ordered;
+
+    const held = ordered[position]!;
+    const best = ordered[0]!;
+    // A held goal the ranking can time, beaten by one it can also time, is a real handover.
+    if (held.seconds !== null && best.seconds !== null) return ordered;
+
+    // THE HOLD ONLY STOPS A SWAP, it does not FORCE one. A working goal at 2nd exchanges with
+    // the goal that took its place; a working goal further down has been beaten for a reason
+    // the ranking can express, and pulling it back to the top would undo a real handover as
+    // surely as a veto would.
+    if (position > 1) return ordered;
+
+    const head = [...ordered];
+    const [first] = head.splice(0, 1, held);
+    head.splice(position, 1, first!);
+    return head;
 }

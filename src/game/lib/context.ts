@@ -1,7 +1,7 @@
-import type { BitNodeMultipliers, FactionName, NS, Player } from "@ns";
+import type { BitNodeMultipliers, CompanyName, FactionName, NS, Player } from "@ns";
 
 import type { Capabilities } from "./caps.ts";
-import { currentGoal, deriveGoals, rankByTime, standingOf, withEstimate, withParticipation, type FactionRep, type GangStanding, type Goal, type Participation, type RateLookup } from "./objective.ts";
+import { currentGoal, deriveGoals, rankByTime, standingOf, withEstimate, withParticipation, type FactionRep, type GangStanding, type Goal, type Participation, type RateLookup, type WorkingGoal } from "./objective.ts";
 import { createRecentLines, type RecentLines } from "./log.ts";
 import { respectPhaseEnd, territoryEnableBelow } from "./gang-measures.ts";
 import { readNetWorth } from "./net-worth.ts";
@@ -62,6 +62,21 @@ export interface Snapshot {
      * cannot be derived from different numbers than the rest of the tick.
      */
     readonly stockAccessCost: number;
+    /**
+     * What the 4S Market Data TIX API costs, or 0 when buying it is not the next purchase.
+     *
+     * Separate from `stockAccessCost` above, which reports the NEXT unowned link in the
+     * chain. That is the right figure for the "what do I buy next" goal and the wrong one
+     * for `hacknet.ts`, which raises cash for this specific purchase and has to know its
+     * price before the rest of the chain is paid off. The two agree only once the WSE
+     * account and TIX API are owned — see `fourSCost`.
+     *
+     * 0 ALSO MEANS "NOT YET THE NEXT PURCHASE", which is the common case early in a run:
+     * a player who has not bought the TIX API yet is two links away from 4S, and hashes
+     * must not be diverted toward it. `fourSCost` owns that rule so no reader has to
+     * remember it.
+     */
+    readonly fourSCost: number;
     /**
      * Cash another feature has reserved and that the goal must not count as
      * spendable.
@@ -202,6 +217,21 @@ export interface Context {
      */
     readonly recent: RecentLines;
     /**
+     * When the retirement stall clock comes due, and how much is queued, or null when it
+     * is not counting.
+     *
+     * A COUNTDOWN, which is why it has to be published rather than left inside the
+     * feature. Every other threshold in the framework can be checked against a figure
+     * already on screen — five queued augmentations are visible as a queue — but a timer
+     * nobody can see is indistinguishable from a timer that never armed, and "it is
+     * still waiting" then reads as patience however wrong it is.
+     *
+     * `dueAt` is an absolute timestamp for the same reason `LogMessage.at` is: the
+     * countdown keeps running between orchestrator passes, so a duration would be stale
+     * the moment after it was computed.
+     */
+    readonly stall: { readonly dueAt: number; readonly queued: number } | null;
+    /**
      * The current node's multipliers, read on first use.
      *
      * A function rather than a field because reading it costs 4 GB and most
@@ -224,6 +254,7 @@ export function createSnapshot(ns: NS, reservedCash = 0): Snapshot {
         homeMaxRam: ns.getServerMaxRam("home"),
         homeUsedRam: ns.getServerUsedRam("home"),
         stockAccessCost: stockAccessCost(ns),
+        fourSCost: fourSCost(ns),
         reservedCash,
         // Cash plus holdings, the figure the wealth-gated features read. Read here, where
         // the stock calls belong, so the goal and the features cannot disagree.
@@ -435,6 +466,50 @@ export function stockAccessCost(ns: NS): number {
     }
 }
 
+/**
+ * What the 4S Market Data TIX API costs, or 0 when it is already owned OR not yet the
+ * next purchase — i.e. 0 unless buying 4S is the very next thing the run would do.
+ *
+ * NOT `stockAccessCost` WITH A DIFFERENT NAME, which is why it exists separately. That
+ * function reports the NEXT unowned link, so on a player who has not yet bought the WSE
+ * account it returns the WSE cost — correct for a goal that asks "what do I buy next", and
+ * wrong for everything that asks "what would the 4S integration cost". The two questions
+ * coincide only once the rest of the chain is complete.
+ *
+ * `hacknet.ts` needs the second question answered: it converts hashes to cash to fund this
+ * one purchase, and the sum to aim at has to be this figure rather than whatever link
+ * happens to be next. Reading `stockAccessCost` there would make hacknet stop selling at
+ * the wrong number for the whole early game, and the symptom — a run that stops producing
+ * the cash it was producing cash for — would look like a decision rather than a bug.
+ *
+ * THE TIX GATE IS DELIBERATE, and it is inside this function rather than at the call site
+ * so that every consumer inherits it. Without it the figure is non-zero on a brand-new run
+ * that owns neither the WSE account nor the TIX API, and a feature that funds "the 4S
+ * price" then diverts hashes toward ~$25b before the run has any stock access at all —
+ * jumping the queue ahead of the two cheaper links `home.ts` actually buys first. The cash
+ * is not wasted (it pays for WSE and TIX on the way), but the intent is wrong: the run
+ * stops spending hashes on training and Bladeburner to fund a purchase that is two steps
+ * away, and does so for most of the early game.
+ *
+ * `hasTixApiAccess()` rather than `hasWseAccount()` because the WSE account is the first
+ * link: a player with the account and no TIX API still has a cheaper purchase queued ahead
+ * of 4S. Once both are owned, 4S IS the next link — exactly the condition the caller cares
+ * about — so the two questions become the same one and this returns the real price.
+ *
+ * Never throws, for the reason `stockAccessCost` gives: a figure the framework cannot read
+ * must not fault an orchestrator pass. Reading 0 from a throw is the safe direction for the
+ * same reason it is safe everywhere else here — nothing diverts hashes toward a purchase
+ * the framework cannot price.
+ */
+export function fourSCost(ns: NS): number {
+    try {
+        if (!ns.stock.hasTixApiAccess()) return 0;
+        return ns.stock.has4SDataTixApi() ? 0 : ns.stock.getConstants().MarketDataTixApi4SCost;
+    } catch {
+        return 0;
+    }
+}
+
 /** A fresh ring, owned by whoever builds the Context. */
 export function createRecent(ns: NS): RecentLines {
     return createRecentLines(ns);
@@ -509,6 +584,13 @@ export function deriveGoalsFor(
      * a run that passes no lookup gets `null` estimates rather than wrong ones.
      */
     rate: RateLookup = () => null,
+    /**
+     * The goal the features are acting on this pass, so the ranking does not trade it away on
+     * a spend. See `WorkingGoal` in `objective.ts` — the argument reaches `rankByTime`
+     * unchanged, and it is passed in rather than held here because this module derives and
+     * does not remember.
+     */
+    working: WorkingGoal = {},
 ): Goal[] {
     const player = snapshot.player;
     const estimated = withEstimate(
@@ -528,6 +610,10 @@ export function deriveGoalsFor(
                     snapshot.netWorth,
                     snapshot.gang,
                     snapshot.reputation,
+                    // `player.jobs` is keyed by company name and the game populates it for
+                    // every current position, so this needs no extra game call and cannot
+                    // disagree with what `workForCompany` acts on.
+                    new Set(Object.keys(player.jobs) as CompanyName[]),
                 ),
                 new Set(player.factions),
             ),
@@ -542,8 +628,9 @@ export function deriveGoalsFor(
     // filling at. Measured against the recorded runs, 54 of 74 head changes were exact
     // reversals — A to B to A inside a minute. See `rankByTime`, including why the
     // ordering is only partial and what it does with the goals it cannot time.
-    return rankByTime(estimated, rate);
+    return rankByTime(estimated, rate, working);
 }
+
 /**
  * Work out what the run is chasing: the single nearest goal, or null when there is none.
  *
