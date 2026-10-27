@@ -22,6 +22,10 @@ import { resolve } from 'node:path';
  * time, which is why reading it positionally produced three wrong conclusions in
  * one session. Stamping arrival time is what turns it into a timeline.
  *
+ * ONE FILE PER SESSION, and a session is one BitNode. When the game installs a node the
+ * server rolls to a new file rather than waiting to be restarted; `rollRun` closes the old
+ * one with a final `meta` line so the file cannot be mistaken for a run that was killed.
+ *
  * THREE STREAMS, all already arriving at the server:
  *
  *   meta       one header line: when the run started, and which build
@@ -57,13 +61,60 @@ let startedAt = 0;
 let broken = false;
 
 /**
+ * How many runs this process has written.
+ *
+ * The session outlives a BitNode: when the game installs a node the server rolls to a new
+ * file rather than the operator restarting it. So this is a counter, not a constant — and
+ * every record's `t` is measured from ITS session's start, so a file reads as a timeline
+ * whichever session in the process wrote it.
+ */
+let sessions = 0;
+
+/**
  * Begin a run, writing the header.
  *
  * The file name is the start time, so runs sort chronologically and a directory
  * of them reads as a history. Returns the path, for logging.
  */
 export function startRun(build: string): string | null {
+    return open(build, null);
+}
+
+/**
+ * Close the current run and open a new one, keeping both.
+ *
+ * WHY A ROLL RATHER THAN A RESTART. The session boundary is a BitNode install, and the
+ * operator was previously expected to stop the server and start it again at that moment —
+ * which is the one moment a run resets and a terminal is the last thing on their mind.
+ * Rolling keeps the old file whole and opens a new one after a closing line.
+ *
+ * The closing line is written so a file is self-describing: a run that simply stops, with
+ * no final record, cannot be told apart from a server killed mid-run, and the difference
+ * matters when reading a directory of them back.
+ */
+export function rollRun(build: string, reason: string): string | null {
+    // The reason belongs to the file that is ENDING, not the one that follows: it names the
+    // transition that closed this run, and the new file's header will carry the same words
+    // as the reason it EXISTS. Both are written, because a reader could arrive from either
+    // direction — a file that stops with no explanation, and a file whose header is read out
+    // of context, are the two ways this directory gets misread.
+    if (!broken && file !== null) {
+        record({ t: elapsed(), kind: 'meta', event: 'end', session: sessions, reason });
+    }
+    return open(build, reason);
+}
+
+/**
+ * Open a run file and write its header.
+ *
+ * `reason` is set only when the file continues a process rather than starting one, and it
+ * is also a filename suffix: a roll can land in the same millisecond as the open it
+ * follows — frames arrive every second, so the name is that coarse — and `w` would then
+ * overwrite the session it was meant to preserve.
+ */
+function open(build: string, reason: string | null): string | null {
     try {
+        sessions += 1;
         startedAt = Date.now();
         dir = resolve(process.cwd(), 'runs');
         mkdirSync(dir, { recursive: true });
@@ -71,13 +122,22 @@ export function startRun(build: string): string | null {
         // Colons are awkward in file names on some platforms; the dots keep it
         // sortable and readable without them.
         const stamp = new Date(startedAt).toISOString().replace(/:/g, '.');
-        file = resolve(dir, `${stamp}.jsonl`);
+        const name = reason === null ? `${stamp}.jsonl` : `${stamp}--${sessions}.jsonl`;
+        file = resolve(dir, name);
 
         // `w` not `a`: the name already identifies the run, and a collision would
         // mean two runs sharing a file, which is worse than overwriting.
         writeFileSync(file, '');
 
-        record({ t: 0, kind: 'meta', build, startedAt, pid: process.pid });
+        record({
+            t: 0,
+            kind: 'meta',
+            build,
+            startedAt,
+            pid: process.pid,
+            session: sessions,
+            ...(reason === null ? {} : { reason }),
+        });
         return file;
     } catch (error) {
         return disable('start', error);
@@ -121,7 +181,7 @@ export function runFile(): string | null {
     return file;
 }
 
-/** Milliseconds since the run began, or 0 before it has. */
+/** Milliseconds since this SESSION began, or 0 before one has. */
 function elapsed(): number {
     return startedAt === 0 ? 0 : Date.now() - startedAt;
 }

@@ -36,6 +36,14 @@ export interface TelemetryState {
     homeRam?: { max?: number; used?: number };
     portfolio?: Portfolio;
     nexus?: NexusState;
+    /** Which BitNode this run is in. See `BitNodeStamp` in `shared/types.ts`. */
+    bitNode?: BitNodeStamp;
+}
+
+/** Which BitNode the run is in, and when it was entered. */
+export interface BitNodeStamp {
+    node: number;
+    installedAt: number;
 }
 
 /**
@@ -113,6 +121,14 @@ export interface NexusState {
     queue?: NexusGoal[];
     features?: NexusFeature[];
     reserves?: { cash?: number; homeRamGb?: number };
+    /**
+     * When the retirement stall clock comes due, or absent when it is not counting.
+     *
+     * Mirrors the same field on `src/shared/types.ts`, which the UI imports. Keep the two
+     * in step: the orchestrator writes this shape, and a field added here but not there is
+     * a value the console renders as missing.
+     */
+    stall?: { dueAt: number; queued: number };
 }
 
 /** A goal waiting behind the current one. */
@@ -250,7 +266,31 @@ export function sample(ns: NS, nexus?: NexusState): TelemetryState {
         },
         portfolio: samplePortfolio(ns),
         nexus,
+        // Reported from the game rather than inferred by the server: only the game knows
+        // when it entered this node, and this is what lets the server close a session on an
+        // install instead of on a process restart. See `BitNodeStamp`.
+        bitNode: sampleBitNode(ns),
     };
+}
+
+/**
+ * Which node this is, and when it began.
+ *
+ * `getResetInfo` is the cheap route — 1 GB, and not subject to the Singularity RAM
+ * multiplier, unlike `getOwnedSourceFiles` — and it is already what the capability
+ * detection reads, so this asks the game nothing new.
+ *
+ * Undefined rather than a guess when it cannot be read: the server treats a frame
+ * WITHOUT a stamp as "no opinion about the node" and never as a different one, so a
+ * failure here can only mean a session that does not roll, never a spurious roll.
+ */
+function sampleBitNode(ns: NS): BitNodeStamp | undefined {
+    try {
+        const info = ns.getResetInfo();
+        return { node: info.currentNode, installedAt: info.lastNodeReset };
+    } catch {
+        return undefined;
+    }
 }
 
 /**

@@ -33,6 +33,32 @@ export interface Observation {
     portfolio?: Portfolio;
     /** What the game's orchestrator is doing, for the console. See `NexusState`. */
     nexus?: NexusState;
+    /**
+     * Which BitNode the run is in, and when that node was entered.
+     *
+     * THE SERVER'S SESSION BOUNDARY. A recorded run is one BitNode: the goals, the
+     * features that can load and the whole economy change at an install, so a file
+     * spanning two of them is two runs sharing a timeline. Without this the server
+     * could only tell them apart by the process restarting, which left the operator
+     * having to stop and start it by hand at exactly the moment the run resets.
+     *
+     * `installedAt` is `ns.getResetInfo().lastNodeReset`, the game's own record of when
+     * the node was entered. Comparing it is what makes the detection robust: a node
+     * number alone cannot see a re-entry into the SAME node, and a node installed
+     * before this server started must not look like a transition it missed.
+     *
+     * Absent when the game cannot read it — the wire allows silence, so a client that
+     * omits the field is never mistaken for one reporting a different node.
+     */
+    bitNode?: BitNodeStamp;
+}
+
+/** Which BitNode a run is in, as the game reports it. */
+export interface BitNodeStamp {
+    /** The node number, from `ns.getResetInfo().currentNode`. */
+    node: number;
+    /** When this node was entered, in the game's clock. Not a timestamp we wrote. */
+    installedAt: number;
 }
 
 /**
@@ -138,6 +164,19 @@ export interface NexusState {
     features?: NexusFeature[];
     /** The reserves in force right now, in the orchestrator's own units. */
     reserves?: { cash?: number; homeRamGb?: number };
+    /**
+     * When the retirement stall clock comes due, or absent when it is not counting.
+     *
+     * A COUNTDOWN, and the only threshold in the run that cannot be checked against a
+     * figure already on the panel. "Five augmentations queued" is visible as a queue; "an
+     * hour since the last purchase" is not visible at all, so without this a waiting run
+     * and a timer that never armed look identical.
+     *
+     * Absent, not zero, when there is nothing to count: before a purchase has been
+     * measured, or with too few queued for the clock to matter. The UI must treat a
+     * missing field as "not counting" rather than as an expired timer.
+     */
+    stall?: { dueAt: number; queued: number };
 }
 
 /** A goal waiting behind the current one. */

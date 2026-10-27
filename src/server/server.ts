@@ -4,8 +4,9 @@ import cors from 'cors';
 import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createDocStore } from '@syncstate/core';
-import type { Command, LogLine } from '../shared/types.ts';
-import { recordCommand, recordLog, recordTelemetry, runFile, startRun } from './recorder.ts';
+import type { BitNodeStamp, Command, LogLine } from '../shared/types.ts';
+import { recordCommand, recordLog, recordTelemetry, rollRun, runFile, startRun } from './recorder.ts';
+import { describeBoundary, isNewSession, type SessionAnchor } from './session.ts';
 
 // `@syncstate/core`'s build touches `window` under `NODE_ENV !== 'production'`
 // (`window['store'] = this`). There is no `window` in Node, so creating a store
@@ -51,7 +52,17 @@ function buildStamp(): string {
     }
 }
 
-const RECORDING_TO = startRun(buildStamp());
+let recordingTo = startRun(buildStamp());
+
+/**
+ * The evidence the current session file began with, or null when it began without any.
+ *
+ * Held beside the recorder rather than inside it, because what counts as a new run is a
+ * decision (`session.ts`) and the recorder only writes files. A session ADOPTS the first
+ * stamp it is given: a server started against a run that has been going for hours must not
+ * split that run just for having an opinion at last.
+ */
+let sessionAnchor: SessionAnchor = { node: null, startedAt: Date.now() };
 
 // ------------------------------------------------------------------ pipe -----
 //
@@ -288,6 +299,12 @@ app.post('/api/sync', (req: Request, res: Response) => {
     // seeing data that actually proves the pipeline is alive.
     lastReceivedAt = Date.now();
 
+    // A new BitNode ends the run in the file. Checked BEFORE the frame is recorded, so the
+    // frame that proves the transition is the first line of the new session rather than the
+    // last line of the old one. See `session.ts` for what counts as a transition — notably
+    // that a frame with no stamp says nothing either way, and never rolls the session.
+    rollSessionOnInstall(state.bitNode);
+
     // The time series. Recorded as received, before it is folded into the doc, so
     // the file holds what the game actually said rather than what the store ended
     // up containing — the two differ if a later frame overwrites a field.
@@ -316,6 +333,50 @@ app.post('/api/sync', (req: Request, res: Response) => {
         res.sendStatus(500);
     }
 });
+
+/**
+ * Start a new run file when the game reports a different BitNode.
+ *
+ * The session used to be tied to the PROCESS, which meant the operator had to stop the
+ * server and start it again whenever their run reset. The game already tells us which node
+ * it is in, so the session can follow the node instead — and the decision itself lives in
+ * `session.ts`, pure, because "what counts as a new run" is the part worth pinning.
+ *
+ * Silent when nothing changes, which is every frame but one per run. When something does
+ * change it says so on the console and in the file header, because the operator needs to be
+ * able to tell "the log rolled" from "the recorder died at the install".
+ */
+function rollSessionOnInstall(stamp: BitNodeStamp | null | undefined): void {
+    // Narrowed once, here: everything below needs a stamp that IS a stamp, and the two
+    // guards would otherwise have to be repeated at every use.
+    if (!isStamp(stamp)) return;
+
+    if (!isNewSession(sessionAnchor, stamp)) {
+        // Nothing transitions, so the only thing left to do is ADOPT evidence the session did
+        // not have — the case `isNewSession` deliberately declines to roll on.
+        if (sessionAnchor.node === null) {
+            sessionAnchor = { node: stamp, startedAt: sessionAnchor.startedAt };
+        }
+        return;
+    }
+
+    const reason = describeBoundary(sessionAnchor, stamp);
+    // The anchor moves to the new node BEFORE the file is opened, so every frame after this
+    // one is judged against the run that is now being recorded — including a frame that
+    // arrives while the write below is still happening.
+    const openedAt = Date.now();
+    sessionAnchor = { node: stamp, startedAt: openedAt };
+    recordingTo = rollRun(buildStamp(), reason);
+    console.log(recordingTo === null
+        ? `New run (${reason}) but recording is off`
+        : `New run (${reason}) → ${recordingTo}`);
+}
+
+/** Whether a frame's `bitNode` is a node and a time, rather than silence or half an answer. */
+function isStamp(stamp: BitNodeStamp | null | undefined): stamp is BitNodeStamp {
+    return stamp !== null && stamp !== undefined
+        && Number.isFinite(stamp.node) && Number.isFinite(stamp.installedAt);
+}
 
 /**
  * A tiny liveness endpoint.
@@ -358,11 +419,15 @@ app.use(
     }
 );
 
-app.listen(3000, () => {
-    console.log('Sync server (dumb pipe) listening on http://localhost:3000');
+// `PORT` so a second server can be run beside the development one: the roll is a behaviour
+// worth exercising without disturbing the session the game is currently reporting to.
+const PORT = Number(process.env.PORT ?? 3000);
+
+app.listen(PORT, () => {
+    console.log(`Sync server (dumb pipe) listening on http://localhost:${PORT}`);
     // Named at boot because the path is otherwise only discoverable from the file
     // system, and knowing it is the difference between having data and looking for it.
-    console.log(RECORDING_TO === null
+    console.log(recordingTo === null
         ? 'Run recording disabled'
-        : `Recording run to ${RECORDING_TO}`);
+        : `Recording run to ${recordingTo}`);
 });

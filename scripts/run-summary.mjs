@@ -45,7 +45,21 @@ console.log(`=== run: ${path} ===`);
 if (meta) {
     console.log(`  started   ${new Date(meta.startedAt).toISOString()}`);
     console.log(`  build     ${meta.build}`);
+    // Which session in its process this file is, and why it began. Files are rolled by
+    // a BitNode install now, so a directory holds several for one server run and the
+    // header is what says which node this one actually covers.
+    if (meta.reason) console.log(`  new run   ${meta.reason}`);
+    else console.log('  new run   first run of its process');
 }
+
+// A run that was rolled ends with a `meta` line saying so. Absent, the file simply
+// stops: the server was killed, or the process was restarted under it. That difference
+// is not visible in the duration, and it is the first thing worth knowing about a file
+// that looks short.
+const closing = lines.find((l) => l.kind === 'meta' && l.event === 'end');
+console.log(closing
+    ? `  ended     by ${closing.reason ?? 'a roll'}`
+    : '  ended     abruptly — no closing record (killed, or restarted)');
 console.log(`  records   ${lines.length} (${telemetry.length} telemetry, ${logs.length} log, ${commands.length} command)`);
 
 const last = lines[lines.length - 1];
