@@ -1,5 +1,31 @@
 import type { NexusState } from "../doc";
-import { moneyFull, eta } from "../format";
+import { useEffect, useState } from "react";
+
+import { moneyFull, eta, countdown } from "../format";
+
+/**
+ * A clock that ticks only while `active`, so the countdown moves between telemetry
+ * frames.
+ *
+ * WHY A LOCAL CLOCK. Telemetry arrives about once a second, which is enough for every
+ * other figure here — they are levels, and a level that is a second stale is still
+ * true. A countdown is not: repainting `47m` once a second looks frozen when the last
+ * minute is the only part a reader is watching. Ticking locally makes the seconds move
+ * without asking the game for anything.
+ *
+ * Paused when there is no countdown, which is the ordinary state of a run. An interval
+ * that re-renders the panel every second to display nothing is a cost with no answer.
+ */
+function useNow(active: boolean): number {
+    const [now, setNow] = useState(() => Date.now());
+    useEffect(() => {
+        if (!active) return;
+        setNow(Date.now());
+        const id = setInterval(() => setNow(Date.now()), 1000);
+        return () => clearInterval(id);
+    }, [active]);
+    return now;
+}
 
 /**
  * What the game's orchestrator is doing, read live from the store.
@@ -19,6 +45,7 @@ export function NexusPanel({ nexus }: { nexus: NexusState }) {
     const faults = features.filter(
         (f) => f.state === "failed" || f.state === "unloadable"
     );
+    const now = useNow(nexus.stall !== undefined);
 
     return (
         <section className="panel panel--nexus">
@@ -133,6 +160,22 @@ export function NexusPanel({ nexus }: { nexus: NexusState }) {
                         </dd>
                     </dl>
                 )}
+
+            {/* The retirement stall countdown, shown only while it is actually counting.
+                Every other figure here is a level a reader can check against something
+                else on screen; this one is a timer, and a timer that is not visible
+                cannot be told apart from a timer that never armed. Absent means the
+                clock is not running — too little queued, or nothing bought yet. */}
+            {nexus.stall && (
+                <p className="stall" title={`Installs anyway when the queue stops growing${nexus.stall.queued > 0 ? ` — ${nexus.stall.queued} queued` : ""}`}>
+                    <span className="stall__label">stall install in</span>{" "}
+                    <span
+                        className={`stall__value${nexus.stall.dueAt - now <= 0 ? " stall__value--due" : ""}`}
+                    >
+                        {countdown(nexus.stall.dueAt, now)}
+                    </span>
+                </p>
+            )}
 
             {faults.length > 0 && (
                 <ul className="faults">

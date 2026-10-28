@@ -405,6 +405,36 @@ code {
     color: var(--danger);
 }
 
+/* ------------------------------------------------------- retirement stall */
+
+/* The countdown to a fallback install. A timer rather than a level, so it is set
+   apart from the figures around it: it is the one number here that changes on its
+   own, and the one a reader is waiting on.
+   Tabular figures so the digits do not shuffle as it counts down. */
+.stall {
+    margin: 10px 0 0;
+    font-size: 12px;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+}
+
+.stall__label {
+    color: var(--faint);
+}
+
+.stall__value {
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+}
+
+/* Expired: the run is about to reset for reasons worth reading about, which is the
+   same weight the dashboard gives a fault. */
+.stall__value--due {
+    color: var(--amber);
+}
+
 /* --------------------------------------------------------------- portfolio */
 
 /* Numeric columns line up across rows as values change. */

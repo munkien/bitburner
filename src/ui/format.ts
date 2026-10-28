@@ -75,6 +75,27 @@ export function percent(value: number | null | undefined): string {
 }
 
 /**
+ * A countdown to an absolute timestamp, as a short label: `47m`, `12s`, `due`.
+ *
+ * Absolute rather than a duration because the countdown keeps running between
+ * orchestrator passes: a duration would be stale the instant after it was computed, and
+ * the panel repaints more often than it is told a new one.
+ *
+ * Coarse on purpose, like `eta`, and for the same reason — the figure it counts down to
+ * is a retirement deadline, not a measurement, so seconds would imply precision that the
+ * thing being counted has never had. Under a minute is the one exception: that is the
+ * window where a reader can watch it move, and `0m` for fifty seconds would be a lie.
+ */
+export function countdown(dueAt: number | null | undefined, now: number): string {
+    if (dueAt === null || dueAt === undefined || !Number.isFinite(dueAt)) return "—";
+    const remaining = Math.round((dueAt - now) / 1000);
+    if (remaining <= 0) return "due";
+    if (remaining < 60) return `${remaining}s`;
+    if (remaining < 3600) return `${Math.round(remaining / 60)}m`;
+    return `${(remaining / 3600).toFixed(1)}h`;
+}
+
+/**
  * An estimated duration in seconds, as a short label: `12m`, `3.4h`.
  *
  * Deliberately coarse. The estimate behind it is a ratio of measured rates and
