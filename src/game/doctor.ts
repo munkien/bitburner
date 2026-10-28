@@ -1,7 +1,7 @@
 import type { NS } from "@ns";
 
 import { detectCapabilities, CAPABILITY_KEYS, type Capabilities } from "./lib/caps.ts";
-import { FEATURES, featurePaths, featureParticipation } from "./lib/registry.ts";
+import { FEATURES, featurePaths, featureParticipation, featuresInOrder } from "./lib/registry.ts";
 import { unavailableReason } from "./lib/features.ts";
 import { decideMode, decideWarfare, scanEnemies, wantedRise, wantedWorkersFor } from "./features/gang/gang-decisions.ts";
 import { deriveGangConfig } from "./features/gang/gang-config.ts";
@@ -35,6 +35,16 @@ import { basename, findScriptOnHome } from "./lib/scripts.ts";
 
 /** Width of the left-hand column, so the report lines up. */
 const LABEL = 26;
+
+/**
+ * Scripts the framework spawns that are not registry Features.
+ *
+ * The Deployment section checks the feature list, which is built from the registry, so
+ * these fall outside it entirely. Each is a script the orchestrator or the player starts
+ * at a moment when its absence is costly, which is what makes them worth reporting on
+ * every doctor run rather than only when one is missing.
+ */
+const STANDALONE = ["install.ts", "manual-retire.ts"] as const;
 
 export function main(ns: NS): void {
     ns.disableLog("ALL");
@@ -70,7 +80,7 @@ export function main(ns: NS): void {
     // that exists but will not compile, so checking only for the file would report
     // a broken deployment as healthy. Both are checked, and they are the same
     // condition the orchestrator's load gate uses.
-    const deployment = featurePaths();
+    const deployment = featurePaths(capabilities.bitNode);
     let broken = 0;
     for (const path of deployment) {
         const resolved = resolve(ns, path);
@@ -85,6 +95,26 @@ export function main(ns: NS): void {
         }
     }
     line(ns, "scripts usable", `${deployment.length - broken}/${deployment.length}`);
+
+    // ── Standalone entries ──
+    //
+    // NOT IN THE REGISTRY, so the loop above cannot see them, and a missing one is
+    // expensive in exactly the case it matters: `install.ts` is what performs the reset,
+    // and its absence is only discovered when a run has already liquidated its holdings
+    // and decided to retire. `manual-retire.ts` is the same shape — it refuses rather than
+    // resetting, but a run reading "not on home" at that moment has already lost the
+    // chance to deploy.
+    //
+    // Resolved by BASENAME like every other path here, because the sync mirrors
+    // `src/game` with its directories intact and these live in subdirectories.
+    for (const name of STANDALONE) {
+        const resolved = findScriptOnHome(ns, name);
+        if (resolved === null) {
+            line(ns, name, "MISSING");
+        } else if (ns.getScriptRam(resolved, "home") <= 0) {
+            line(ns, name, "PRESENT BUT WILL NOT COMPILE");
+        }
+    }
 
     // ── Staleness ──
     //
@@ -145,8 +175,21 @@ export function main(ns: NS): void {
         goals,
         goal: currentGoal(goals),
         recent: createRecent(ns),
+        // The doctor has its own process and never ticks the retirement feature, so it
+        // has no stall clock to show. Null is the honest answer here, not a pass-through:
+        // a diagnostic that reported the orchestrator's timer would be reporting a clock
+        // it is not the owner of.
+        stall: null,
         multipliers: createContextReader(ns, capabilities),
     };
+
+    section(ns, "Hash Spending");
+    // WHY THIS SECTION EXISTS. The 4S funding rule is invisible when it is not firing:
+    // hashes accumulate, nothing is bought, and there is no way to tell from the outside
+    // whether the rule decided "not needed", "cannot afford the sale", or never ran at
+    // all. Every input to that decision is printed here, in the order the code tests them,
+    // so the answer is one look rather than an afternoon.
+    reportHashSpending(ns, snapshot);
 
     section(ns, "Home RAM");
     const ownRam = ramOf(ns, "nexus.ts");
@@ -195,7 +238,7 @@ export function main(ns: NS): void {
     let wouldLoad = 0;
     let totalRam = ownRam;
 
-    for (const feature of [...FEATURES].sort((a, b) => a.priority - b.priority)) {
+    for (const feature of featuresInOrder(capabilities.bitNode)) {
         const reason = unavailableReason(feature, context);
         if (reason !== null) {
             line(ns, feature.name, `skip: ${reason}`);
@@ -439,6 +482,99 @@ const report: string[] = [];
 
 /** Where the report lands, on home. Reachable from the terminal and from file sync. */
 export const REPORT_FILE = "doctor_report.txt";
+
+/**
+ * Every input to the hash-spending decision, in the order the code tests it.
+ *
+ * Ordered rather than sorted by importance, because the branches RETURN: the first line
+ * that says "no" is the reason nothing is happening, and everything below it is
+ * unreachable. Reading it top to bottom answers "why is nothing being sold" directly.
+ *
+ * `chosen` is the decision itself, called with the same figures the feature would use, so
+ * this reports the real answer rather than a re-derivation of it.
+ */
+function reportHashSpending(ns: NS, snapshot: Snapshot): void {
+    // ── Gate 1: does `spendHashes` run at all? ──
+    // The feature only spends hashes when node 0 is a Hacknet SERVER. Plain Hacknet Nodes
+    // have no hash cache, `hashCapacity()` returns 0, and `spendHashes` returns on its
+    // first line — which is the single most likely reason a run sees no hash spending.
+    let capacity = 0;
+    try {
+        capacity = ns.hacknet.hashCapacity();
+    } catch {
+        capacity = 0;
+    }
+    const nodeCount = ns.hacknet.numNodes();
+    line(ns, "nodes", String(nodeCount));
+    line(ns, "hash capacity", `${ns.format.number(capacity)}${capacity > 0 ? "" : "  ← spendHashes returns here"}`);
+
+    if (capacity <= 0) {
+        line(ns, "verdict", "no hash cache: Hacknet Servers (SF9) required for any hash spending");
+        return;
+    }
+
+    // ── Gate 2: is there anything to spend? ──
+    const hashes = ns.hacknet.numHashes();
+    line(ns, "hashes", `${ns.format.number(hashes)} / ${ns.format.number(capacity)}`);
+
+    // ── Gate 3: the 4S funding rule ──
+    // `fourSCost` is read from the snapshot, so a 0 there is ambiguous on its own: owned,
+    // not yet the next purchase, or unreadable. Each is reported separately here, because
+    // they need different fixes and only one of them is a bug.
+    let owned4S = false;
+    let ownsTix = false;
+    let raw4SCost = 0;
+    try {
+        owned4S = ns.stock.has4SDataTixApi();
+        ownsTix = ns.stock.hasTixApiAccess();
+        raw4SCost = ns.stock.getConstants().MarketDataTixApi4SCost;
+    } catch (error) {
+        line(ns, "4S API", `unreadable (${String(error)})`);
+        return;
+    }
+    line(ns, "TIX API owned", ownsTix ? "yes" : "no  ← 4S is not the next purchase yet");
+    line(ns, "4S API owned", owned4S ? "yes" : "no");
+    line(ns, "4S price (live)", ns.format.number(raw4SCost));
+    line(ns, "4S price (snapshot)", ns.format.number(snapshot.fourSCost));
+    line(ns, "home cash", ns.format.number(snapshot.homeCash));
+
+    const saleCost = ns.hacknet.hashCost("Sell for Money");
+    line(ns, "hash cost per sale", ns.format.number(saleCost));
+
+    // The gate, reported before the arithmetic: without the TIX API the figure is 0 by
+    // design and the rule is deliberately asleep, which is not the same as broken.
+    if (!ownsTix) {
+        line(ns, "4S rule", "INACTIVE — the TIX API is unowned, so 4S is not the next purchase");
+        line(ns, "verdict", "ordinary hash upgrades apply; the rule engages once TIX is bought");
+        return;
+    }
+
+    if (!owned4S && snapshot.fourSCost > 0 && snapshot.homeCash < snapshot.fourSCost) {
+        const short = snapshot.fourSCost - snapshot.homeCash;
+        const salesNeeded = Math.ceil(short / 1_000_000);
+        const hashesNeeded = salesNeeded * saleCost;
+        line(ns, "4S rule", "ACTIVE — hashes are being converted to cash");
+        line(ns, "cash short by", ns.format.number(short));
+        line(ns, "sales needed", ns.format.number(salesNeeded));
+        line(ns, "hashes needed", ns.format.number(hashesNeeded));
+        if (hashes < hashesNeeded) {
+            line(ns, "verdict", "waiting to accumulate enough hashes for the sales");
+        } else if (hashes < saleCost) {
+            line(ns, "verdict", "cannot afford even one sale yet");
+        } else {
+            line(ns, "verdict", "should be selling — if nothing is happening, the feature is not loading");
+        }
+        return;
+    }
+
+    // ── Gate 4: why the feature may not be loaded at all ──
+    const caps = detectCapabilities(ns);
+    const loaded = caps.has("serverIncome");
+    line(ns, "serverIncome", loaded ? "yes" : "no — the whole hacknet feature is switched off");
+    line(ns, "verdict", owned4S
+        ? "4S owned; ordinary hash upgrades apply"
+        : "4S rule inactive (price unreadable, or cash already covers it)");
+}
 
 function section(ns: NS, title: string): void {
     report.push(`\n── ${title} ${"─".repeat(Math.max(0, 40 - title.length))}`);

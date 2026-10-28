@@ -3,7 +3,7 @@ import type { NS } from "@ns";
 import type { Context } from "./lib/context.ts";
 import { announce } from "./lib/log.ts";
 import { BLADES_SIMULACRUM } from "./lib/caps.ts";
-import { hasBladeburnerAction } from "./features/player/activity.ts";
+import { hasActiveBlackOp, hasBladeburnerAction } from "./features/player/activity.ts";
 
 /*
  * ============================================================================
@@ -68,7 +68,15 @@ export function tick(ns: NS, context: Context): void {
     // Simulacrum, which is exactly the augment that stops them doing so. With it,
     // a running contract no longer conflicts with a graft and there is no reason
     // to wait for one.
-    if (hasBladeburnerAction(ns, !context.capabilities.has("bladesSimulacrum"))) return;
+    //
+    // A BLACK OP STILL BLOCKS, augment or not. `hasBladeburnerAction` treats every
+    // non-Idle action alike, so this gate was also skipping past a running black op —
+    // and a black op is time-sensitive and losing it is not recoverable the way a gym
+    // class is. The distinction is worth the extra call here because the failure is
+    // silent: the graft starts, the op is cancelled, and nothing says so.
+    if (hasBladeburnerAction(ns, !context.capabilities.has("bladesSimulacrum"))) {
+        if (hasActiveBlackOp(ns)) return;
+    }
 
     const { player } = context.snapshot;
     const target = bestGraft(ns, player.money, context);

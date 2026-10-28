@@ -2,7 +2,7 @@ import type { BladeburnerActionName, BladeburnerActionType, BladeburnerSkillName
 
 import { publishBladeburnerActivity } from "../../lib/bladeburner-activity.ts";
 import type { Context } from "../../lib/context.ts";
-import { bladeburnerYieldsForTraining, hasSingularityWork, trainingRemaining, winnableBlackOp } from "../player/activity.ts";
+import { bladeburnerYieldsForTraining, hasSingularityWork, trainingRemaining, trainingWantedHeld, winnableBlackOp } from "../player/activity.ts";
 import { announce, clearStatus, publishStatus, shortError } from "../../lib/log.ts";
 
 /*
@@ -271,6 +271,48 @@ function pickAction(ns: NS, currentName?: string): Act {
 }
 
 /**
+ * Why no contract or operation is takeable, as a log-ready sentence.
+ *
+ * WHY THIS EXISTS. `Training` is the fallback for "nothing is safe", and it is the one
+ * branch with no report at all: the division starts it once, announces the switch, and then
+ * says nothing for as long as it runs. A run spent forty minutes there with no way to tell
+ * whether that was patience or a defect — the same "reads as patience, might be stuck"
+ * failure this file has already been repaired for twice (the understrength team, and the
+ * finished rest that never released the slot).
+ *
+ * The full list is printed rather than a summary, because the interesting question is never
+ * "is anything safe" but "HOW FAR below the bar is the best one" — a division at 0.78 on its
+ * best action is minutes from resuming, while one at 0.3 needs a great deal more training.
+ * Those look identical from the action name alone.
+ *
+ * Read-only: it takes the same estimates `pickAction` takes and must not change what the
+ * feature does. That is why it is called only on the fallback path.
+ *
+ * Exported for tests. The decision it describes is the one nobody can see from the outside,
+ * so being able to assert its wording is worth more here than keeping it private.
+ */
+export function describeFallback(ns: NS): string {
+    const bb = ns.bladeburner;
+    const lines: string[] = [];
+
+    for (const [type, name] of WORK) {
+        try {
+            const counts = bb.getActionCountRemaining(type, name);
+            const [lo, hi] = bb.getActionEstimatedSuccessChance(type, name);
+            const mid = (lo + hi) / 2;
+            const verdict = counts < 1
+                ? "no counts"
+                : mid >= MIN_CHANCE ? "TAKEABLE" : `below ${MIN_CHANCE}`;
+            lines.push(`${name}: ${mid.toFixed(3)} (${lo.toFixed(2)}-${hi.toFixed(2)}) counts=${counts} ${verdict}`);
+        } catch (error) {
+            lines.push(`${name}: unreadable (${shortError(error)})`);
+        }
+    }
+
+    return lines.join("; ");
+}
+
+/**
  * The best safe action available, or null when none is.
  *
  * WHY THIS REPLACED A `WORK.find`. The old selection returned the first entry of a
@@ -492,6 +534,16 @@ let actionRunning = false;
 
 export function tick(ns: NS, context: Context): void {
     const bb = ns.bladeburner;
+
+    // CLEARED EVERY TICK, because `reason` is a statement about THIS tick and nothing
+    // else. It used to be written only on the branches that take an action, so any tick
+    // that returned without one left the previous answer standing — and the one answer
+    // that could never be corrected was the initial "starting", which meant a division
+    // that had wedged reported "starting" for the rest of the run. Measured live: 3,215
+    // consecutive telemetry samples, 23 minutes, with nothing running and `reason` never
+    // moving. A blank reason now reads as "nothing to report", which `publishStatus`
+    // turns into "starting" exactly once per tick rather than forever.
+    reason = "";
     publishStatus("bladeburner", () => reason || "starting");
 
     // Published every tick, including the early returns below — the not-in-division
@@ -669,7 +721,7 @@ export function tick(ns: NS, context: Context): void {
         bladeburnerYieldsForTraining(
             ns,
             sharesSlot,
-            trainingRemaining(context.snapshot.player, context.goal),
+            trainingWantedHeld(trainingRemaining(context.snapshot.player, context.goal)),
         )
     ) {
         if (isResting) bb.stopBladeburnerAction();
@@ -714,6 +766,19 @@ export function tick(ns: NS, context: Context): void {
                 const stamPct = ((stam / stamMax) * 100).toFixed(1);
                 announce(ns, "BLADEBURNER", `Switched to ${name} (${type}) | Stamina: ${stamPct}% | Rank: ${ns.format.number(bb.getRank())}`);
                 lastLoggedAction = name;
+
+                // Training is the "nothing is safe" fallback and is otherwise silent for as
+                // long as it runs. Say why it was chosen, once, at the moment it is chosen —
+                // the switch above already reports only on change, so this inherits that
+                // cadence and cannot spam a tick.
+                if (name === TRAIN[1]) {
+                    announce(
+                        ns, "BLADEBURNER",
+                        `No safe contract or operation, so training. ` +
+                        `Stamina ${stamPct}% (rest below ${REST_BELOW * 100}%). Estimates: ${describeFallback(ns)}`,
+                        "warn",
+                    );
+                }
             } else if (name === "Hyperbolic Regeneration Chamber" && lastLoggedAction !== "Resting") {
                 announce(ns, "BLADEBURNER", `Stamina at ${((stam / stamMax) * 100).toFixed(1)}%. Resting until ${REST_UNTIL * 100}%...`);
                 lastLoggedAction = "Resting";
