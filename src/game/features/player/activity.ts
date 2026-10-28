@@ -200,6 +200,51 @@ export function bladeburnerKeepsSlot(
 }
 
 /**
+ * Whether training is wanted, HELD STICKY so a flicker cannot reverse the handover.
+ *
+ * WHY THIS EXISTS, and it is the second half of the same reported fault. The truth
+ * table above makes the pair consistent WITHIN a tick, but the input they share —
+ * `trainingRemaining` — is derived from a rate model that recalibrates: `trackRate`
+ * drops its open sample whenever the player is not in a class, so the first readings
+ * after a class boundary report no rate at all, and the value can therefore read
+ * `true` on one tick and `false` on the next with nothing in the world having changed.
+ *
+ * A handover driven by that input is a handover driven by noise. Measured as the
+ * symptom this whole file exists to prevent, in its newest form: Bladeburner stands
+ * down for training, progression finds nothing it can start (its cap, a travel, a
+ * reachable-stat switch), and the next tick reverses both. Neither makes progress and
+ * the log says both are behaving correctly.
+ *
+ * So the answer LATCHES. Once training is wanted it stays wanted for `HOLD_MS`, which
+ * is longer than any recalibration window by an order of magnitude and shorter than the
+ * training cap, so a genuinely finished target releases the slot well inside the time
+ * the run would have spent on it anyway. `false` is returned immediately and only ever
+ * after the hold has expired — there is no symmetric latch, because the direction that
+ * must not flicker is the one that hands work to training.
+ *
+ * The clock is module state, like `trainingRatePublisher`, and is reset with it: two
+ * tests in one process must not inherit each other's hold.
+ */
+const HOLD_MS = 90_000;
+let wantedSince = 0;
+
+export function trainingWantedHeld(trainingWanted: boolean, now: number = Date.now()): boolean {
+    if (trainingWanted) {
+        if (wantedSince === 0) wantedSince = now;
+        return true;
+    }
+    if (wantedSince === 0) return false;
+    if (now - wantedSince < HOLD_MS) return true;
+    wantedSince = 0;
+    return false;
+}
+
+/** Forget the hold. Exported for tests, alongside `publishTrainingRate(null)`. */
+export function resetSlotHold(): void {
+    wantedSince = 0;
+}
+
+/**
  * Whether Bladeburner is about to hand the slot back for training.
  *
  * The other side of `bladeburnerKeepsSlot`, stated separately so each caller
@@ -326,10 +371,40 @@ export function trainingRemaining(player: Player, goal: Goal | null): boolean {
 
     // The rate for the measurement being trained, published by the feature that measures it.
     // Bladeburner has no rate model of its own and must not grow one — a second measurement
-    // would be a second thing to disagree with. Publish nothing (null) and the shared
-    // predicate keeps its "no baseline yet, keep going" behaviour, which is what a fresh run
-    // needs.
+    // would be a second thing to disagree with.
     const stat = under.kind === "hacking" ? "hacking" : STAT_OF_COMBAT[under.skill ?? "strength"];
     const rate = trainingRatePublisher === null ? null : trainingRatePublisher(stat);
-    return floorReachable(under, player.skills[STAT_KEY[stat]], rate);
+    return floorReachable(under, player.skills[STAT_KEY[stat]], rate) && !measuredStall(rate);
 }
+
+/**
+ * Whether a rate that IS evidence says the stat is not moving, so training it is a dead end.
+ *
+ * ONLY A MEASURED RATE CAN BE EVIDENCE. The distinction this preserves is the one
+ * `floorReachable` already makes, and it is the whole point of the slot handover:
+ *
+ *   null        nothing measured yet. NO EVIDENCE. Reads as "training wanted", because the
+ *               slot is a handover and refusing on an unknown hands it to nobody.
+ *   Infinity    unusable arithmetic rather than an observation. Also no evidence.
+ *               (`floorReachable` already reads this as "keep training".)
+ *   <= 0        measured, and the stat did not rise. THAT is a stall, and the one case that
+ *               may legitimately keep the slot off training.
+ *
+ * THE FAULT THIS FIXES, and it was measured live rather than reasoned about. An earlier
+ * version of this predicate treated `null` as a stall too, on the argument that "a handover
+ * on an unknown is a handover on nothing". The argument is right and the conclusion was
+ * backwards: `null` is the rate for the ticks right after EVERY class boundary, because
+ * `trackRate` drops its open sample whenever the player is not in a class. So the moment
+ * progression stopped training and Bladeburner got the slot, the rate went null, the
+ * predicate reported "no training wanted", and Bladeburner kept the slot forever while
+ * picking nothing — `reason` never moved off "starting" for 3,215 consecutive ticks, and
+ * progression reported "yielded: Bladeburner keeps the slot (training not wanted)". Neither
+ * feature ran for 23 minutes at a stretch, with hacking frozen at 114 against a target of
+ * 200. The handover must never depend on a reading that is systematically absent exactly
+ * when the handover happens.
+ */
+function measuredStall(rate: number | null): boolean {
+    return rate !== null && Number.isFinite(rate) && rate <= 0;
+}
+
+

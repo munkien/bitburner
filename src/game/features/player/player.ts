@@ -21,7 +21,7 @@ import type { Goal } from "../../lib/objective.ts";
 import { GOAL_TARGETS } from "../../lib/objective.ts";
 import { GANG_CHOICE_FLAG, GANG_KARMA, chosenGangKind, gangFactionFor, gangKindOf, type GangKind } from "../../lib/gangs.ts";
 import { ChangeLog, announce, note, publishStatus, type RecentLines } from "../../lib/log.ts";
-import { bladeburnerKeepsSlot, hasActiveBlackOp, hasActiveGraft, publishTrainingRate, trainingRemaining, winnableBlackOp } from "./activity.ts";
+import { bladeburnerKeepsSlot, hasActiveBlackOp, hasActiveGraft, publishTrainingRate, trainingRemaining, trainingWantedHeld, winnableBlackOp } from "./activity.ts";
 import type { Context } from "../../lib/context.ts";
 import type {
     CityName,
@@ -248,7 +248,20 @@ export function reset(): void {
     lastWarn = "";
     lastReserve = -1;
     openSample = null;
+    // The promotion cadence is per company and outlives a tick. Clearing it on reset means
+    // a test (or a reintroduced feature) does not inherit another's timers — the same
+    // reason `rates` is cleared here rather than left to rot.
+    lastPromotionAttempt.clear();
     for (const key of Object.keys(rates)) delete rates[key as MeasuredStat];
+    // THE REST OF THE MEMORY, and its absence here was a real defect rather than a tidiness
+    // one: `reset` is what a test calls to promise itself a clean slate, and it used to leave
+    // four fields set. An augmented target from an earlier test, a stale `reason` string read
+    // by the status line, and a gang-kind label all survived into the next scenario — the
+    // kind of leak that makes a later test fail for a reason nothing in it explains.
+    lastAugment = null;
+    targetAugment = null;
+    reason = "starting";
+    gangKindLabel = undefined;
 }
 
 let lastAugment: AugTarget | null = null;
@@ -382,7 +395,19 @@ export function tick(ns: NS, context: Context): void {
     // a contract to a black op, and `hasActiveGraft` protects a graft. And this
     // only yields when a Bladeburner action is genuinely in flight — with none
     // running, training proceeds exactly as before.
-    if (winnableBlackOp(ns) || hasActiveBlackOp(ns) || hasActiveGraft(ns)) {
+    //
+    // THE BLACK OP HALF IS SKIPPED WITH THE BLADE'S SIMULACRUM, and it used not to be.
+    // The augment means a Bladeburner action does not occupy the activity slot, so
+    // standing down for one is giving away something the division never took — the same
+    // argument the yield below already made for contracts, applied to the one branch that
+    // still ignored it. Without this, a run holding the augment STILL stopped training
+    // while a black op ran, which is most of the point of owning it.
+    //
+    // A GRAFT IS DIFFERENT and still yields unconditionally: Simulacrum frees the slot
+    // from BLADEBURNER actions, not from grafting, and interrupting a graft destroys its
+    // progress rather than pausing it.
+    const slotsShared = !context.capabilities.has("bladesSimulacrum");
+    if (yieldsForBlackOpOrGraft(ns, slotsShared)) {
         reason = "yielded: a black op or graft owns the slot";
         return;
     }
@@ -396,7 +421,7 @@ export function tick(ns: NS, context: Context): void {
         bladeburnerKeepsSlot(
             ns,
             !context.capabilities.has("bladesSimulacrum"),
-            trainingRemaining(player, context.goal),
+            trainingWantedHeld(trainingRemaining(player, context.goal)),
         )
     ) {
         // THE TRAINING CAP IS ENFORCED EVEN WHEN YIELDING, and that is the fix for a gym
@@ -423,6 +448,13 @@ export function tick(ns: NS, context: Context): void {
                 return false;
             }
         })();
+        // `noteTraining` BEFORE asking, because the player is demonstrably in a class and that
+        // is what the clock measures. `trainCapVerdict` no longer starts a stretch as a side
+        // effect of being asked — it used to, which meant this branch armed the timer without
+        // meaning to, and a run that yielded for fifteen minutes had the cap fire against
+        // training it never did. Reporting the sighting explicitly says what is true: the
+        // player is in a class right now, so patience is being spent.
+        if (inClass) noteTraining();
         if (inClass && trainCapVerdict() === "capped") {
             const crime = bestCashCrime(ns);
             // `commitCrime` returns the time it will take, not a success flag; a throw is
@@ -442,14 +474,14 @@ export function tick(ns: NS, context: Context): void {
         }
 
         reason = `yielded: Bladeburner keeps the slot${
-            trainingRemaining(player, context.goal)
+            trainingWantedHeld(trainingRemaining(player, context.goal))
                 ? " (chain running)"
                 : " (training not wanted)"
         }`;
         return;
     }
 
-    const chosen = prioritizeAction(ns, player, context.goal, context.recent, canBuyAugs, context.capabilities.has("createGang"));
+    const chosen = prioritizeAction(ns, player, context.goal, context.goals, context.recent, canBuyAugs, context.capabilities.has("createGang"));
     if (chosen === null) {
         reason = "nothing to do: the priority chain returned no action";
         return;
@@ -579,10 +611,31 @@ function effectiveFavor(ns: NS, faction: FactionName): number {
  * every other one work toward the same goal. The ORDER is unchanged: this is the
  * chain as it was, with its thresholds sourced rather than declared.
  */
-function prioritizeAction(
+/**
+ * Choose the next action, in priority order, or null when nothing is worth doing.
+ *
+ * Exported for tests, because the ORDER is the fix for "megacorps are never worked for"
+ * and nothing else pins it. `hireForGoal` can be perfectly correct and still never run if
+ * it is placed after the training branch — which is precisely the state this shipped in:
+ * every recorded run had zero COMPANY actions while the function that would have produced
+ * one sat behind a branch that always had something to return.
+ *
+ * A test of `hireForGoal` alone cannot catch that. Only a test of this function can.
+ */
+export function prioritizeAction(
     ns: NS,
     player: Player,
     goal: Goal | null,
+    /**
+     * Every ranked goal, nearest first. `goal` is the head of this list.
+     *
+     * Both are passed because they answer different questions. The head decides what to
+     * TRAIN toward; the full list decides whether an action the head cannot express — a
+     * job application — is outstanding anywhere. Reading only the head was the bug that
+     * left megacorps unworked: the head is a gang territory goal on a real run, so hiring
+     * saw nothing to do on every tick of an entire session.
+     */
+    goals: readonly Goal[],
     recent: RecentLines,
     canBuyAugs: boolean,
     canCreateGang: boolean,
@@ -598,7 +651,28 @@ function prioritizeAction(
         return { kind: "CRIME", crime: bestCashCrime(ns) };
     }
 
-    // 4. Stat floor: train what the goal is waiting on before pursuing
+    // 4. A job at the megacorp the current goal names.
+    //
+    // HERE, ABOVE the stat floor, and the placement is the fix rather than a detail.
+    //
+    // The stat floor is not a fallible branch that sometimes has nothing to do: with no
+    // measured rate yet — which is the state of every run until it has trained once —
+    // `floorReachable` returns true by design ("no baseline yet, keep going"), so
+    // `statFloor` answers every tick from the first one. Anything below it is dead code
+    // on a fresh run.
+    //
+    // So "megacorps are never worked for" was not one ordering mistake but two: the
+    // application sat at step 8 where the training branch pre-empted it, and even moving
+    // it up one branch would have put it behind a floor that never declines. Employment
+    // cannot be reached by training, so it has to be ahead of the branch that can only
+    // train.
+    //
+    // Below the broke-state floor, deliberately: being unable to afford anything is a
+    // more urgent fact than a job application.
+    const hire = hireForGoal(ns, player, goals);
+    if (hire) return hire;
+
+    // 5. Stat floor: train what the goal is waiting on before pursuing
     //    anything else. Once those floors are met this returns null and we fall
     //    through.
     const floor = statFloor(ns, player, goal);
@@ -659,7 +733,12 @@ function prioritizeAction(
     const program = nextProgram(ns, player.skills.hacking);
     if (program) return { kind: "PROGRAM", program };
 
-    // 7. Stat training for pending factions / megacorps
+    // 7. Stat training for pending factions.
+    //
+    // Megacorps are NOT here: they are employment goals, handled above the stat floor.
+    // This branch used to synthesize a `hacking` requirement for every megacorp the
+    // player was not employed by, so it trained toward a job application it would never
+    // make — qualified forever, employed never.
     const train = factionTraining(ns, player);
     if (train) return train;
 
@@ -690,7 +769,14 @@ function prioritizeAction(
         }
     }
 
-    // 8. Megacorp rep
+    // 9. Any megacorp job the player can hold, whether or not a goal names it.
+    //
+    // NO LONGER THE MAIN PATH, and the comment here used to imply it was. Hiring for a
+    // GOAL is step 4, above the stat floor, because that is the only placement where it
+    // is reachable at all. What is left for this step is the case a goal cannot express:
+    // a player already employed somewhere, who should keep working there while no
+    // employment goal is in front. `bestCompany` returns an existing employer first, so
+    // that is what this does.
     const company = bestCompany(ns, player);
     if (company) return { kind: "COMPANY", company };
 
@@ -788,6 +874,23 @@ function assignAction(ns: NS, context: Context, action: PlayerAction): boolean {
 
     if (action.kind === "BACKDOOR") return runBackdoor(ns, action.hostname);
 
+    // A CLASS THE PLAYER IS ALREADY TAKING IS LEFT ALONE.
+    //
+    // `universityCourse`/`gymWorkout` are not "start if not started": each call is a NEW
+    // action, and the game finishes the running one to make room. Re-issuing them every
+    // tick therefore tears the class down and rebuilds it once a second, forever — the
+    // recorded flicker in `runs/2026-10-28T04.50.35`, one transition per second for ten
+    // minutes with progression reporting "acting: course Computer Science" on both sides.
+    //
+    // The comment above `CLASS_STAT` has warned about this since the file was written
+    // ("or `isDoingAction` never recognises the class and every tick restarts it"), but
+    // the check was only ever wired into the COMPANY promotion path, so the guard the
+    // comment described did not exist. This is that guard.
+    //
+    // Applied INSIDE each class branch, next to the city test it has to agree with. Hoisting
+    // it above the `TRAVEL` branch would let it answer for a player who is in another city:
+    // the slot still holds the old class until the trip completes, so "already studying"
+    // would be true and the trip would never be issued.
     if (action.kind === "TRAVEL") {
         if (context.snapshot.player.city === action.city) return true;
         const ok = ns.singularity.travelToCity(action.city);
@@ -797,9 +900,22 @@ function assignAction(ns: NS, context: Context, action: PlayerAction): boolean {
         return ok;
     }
 
-    if (action.kind === "COMPANY") ensureCompanyJob(ns, action.company);
+    // PROMOTION HAPPENS ON THE PATH WHERE THE PLAYER IS ALREADY DOING THE ACTION.
+    //
+    // This used to sit BEFORE the `isDoingAction` check below, which is the placement that
+    // made promotion impossible: an employed player working at the company hits that
+    // return every tick, so the call above it was reached only on the FIRST tick — the one
+    // that hires — and never again. The run held its entry-level position for the rest of
+    // its life.
+    //
+    // So the two calls are split by state rather than by order: hiring is for a player who
+    // is not working there yet, promotion for one who already is.
+    if (action.kind === "COMPANY" && isDoingAction(current, action)) {
+        maybePromote(ns, action.company, Date.now());
+        return true;
+    }
 
-    if (isDoingAction(current, action)) return true;
+    if (action.kind === "COMPANY") ensureCompanyJob(ns, action.company, Date.now());
 
     let success = false;
     switch (action.kind) {
@@ -808,12 +924,16 @@ function assignAction(ns: NS, context: Context, action: PlayerAction): boolean {
             // and it is made in `prioritizeAction` — see `isInCity`. Doing it
             // here as a side effect is what let two branches fight over the
             // player's location and cancel each other every tick.
-            if (isInCity(currentCityOf(ns), action.city ?? "Sector-12"))
-                success = ns.singularity.gymWorkout(action.gym, action.stat, false);
+            //
+            // And only if the player is not already in THAT class — see `alreadyDoing`.
+            if (isInCity(currentCityOf(ns), action.city ?? "Sector-12")) {
+                success = alreadyDoing(ns, action) || ns.singularity.gymWorkout(action.gym, action.stat, false);
+            }
             break;
         case "UNI":
-            if (isInCity(currentCityOf(ns), action.city ?? "Sector-12"))
-                success = ns.singularity.universityCourse(action.university, action.course, false);
+            if (isInCity(currentCityOf(ns), action.city ?? "Sector-12")) {
+                success = alreadyDoing(ns, action) || ns.singularity.universityCourse(action.university, action.course, false);
+            }
             break;
         case "FACTION":
             success = ns.singularity.workForFaction(action.faction, action.workType, false);
@@ -865,11 +985,45 @@ function getActionKey(a: PlayerAction): string {
     }
 }
 
+/**
+ * Whether the player is already in the class this action names.
+ *
+ * THE GUARD `assignAction` WAS MISSING, and the reason a class was restarted every
+ * second. `universityCourse` and `gymWorkout` each begin a new action and finish whatever
+ * was running, so issuing one for the class already in progress is not a no-op: it is a
+ * tear-down. Only issuing it for a DIFFERENT class is a decision.
+ *
+ * Reads the slot LIVE rather than from the snapshot, for the same reason `currentCityOf`
+ * does: the snapshot is captured once per pass, and the question here is about the state
+ * the game is in when the call is made, not when the pass began.
+ *
+ * A failed read returns false — "not already doing it" — so the action is issued. The
+ * alternative silences the run for the rest of its life, because the slot would look
+ * occupied by something indistinguishable from what was wanted.
+ *
+ * Exported for `class-restart.test.ts`. It is the whole fix, and it is a comparison of one
+ * game call against an action; reaching it through a full `tick` would mean standing up
+ * every other feature to observe a single string comparison.
+ */
+export function alreadyDoing(ns: NS, a: PlayerAction): boolean {
+    if (a.kind !== "UNI" && a.kind !== "GYM") return false;
+    let current: Work | null;
+    try {
+        current = ns.singularity.getCurrentWork() as unknown as Work | null;
+    } catch {
+        return false;
+    }
+    return isDoingAction(current, a);
+}
+
 function isDoingAction(w: Work | null, a: PlayerAction): boolean {
     if (!w) return false;
     switch (a.kind) {
         case "GYM": return w.type === "CLASS" && w.classType === GYM_CLASS[a.stat] && w.location === a.gym;
-        case "UNI": return w.type === "CLASS" && w.location === a.university;
+        // The COURSE is compared as well as the university. Comparing only the university
+        // would treat a switch from Computer Science to Algorithms as a class already in
+        // progress and never issue it, stranding the run on the first course it chose.
+        case "UNI": return w.type === "CLASS" && w.location === a.university && w.classType === a.course;
         case "FACTION": return w.type === "FACTION" && w.factionName === a.faction && w.factionWorkType === a.workType;
         case "COMPANY": return w.type === "COMPANY" && w.companyName === a.company;
         case "CRIME": return w.type === "CRIME" && w.crimeType === a.crime;
@@ -920,19 +1074,141 @@ function currentCityOf(ns: NS): CityName {
     return ns.getPlayer().city;
 }
 
-function ensureCompanyJob(ns: NS, company: CompanyName): void {
-    const fields = ["Software", "IT", "Business", "Security"] as const;
-    for (let i = 0; i < 20; i++) {
-        let progressed = false;
-        for (const field of fields) {
-            try {
-                if (ns.singularity.applyToCompany(company, field)) {
-                    progressed = true;
-                    break;
-                }
-            } catch { }
+/**
+ * Every field the game will hire into.
+ *
+ * THE LIST USED TO BE FOUR, and the four it kept were the software/business ones. The
+ * game has more, and two of them are the only route in for a combat character: `Agent` is
+ * the combat entry position, and a run built on strength could never be hired at all —
+ * `ensureCompanyJob` tried Software, IT, Business and Security, every one of which wants
+ * hacking, and returned having achieved nothing.
+ *
+ * The consultant and engineer variants are separate fields rather than promotions of the
+ * base ones: `applyToCompany` takes a field and returns the highest position in it the
+ * player qualifies for, so trying all of them is how a qualified player reaches the top.
+ */
+const COMPANY_FIELDS = [
+    "Software", "Software Consultant",
+    "IT", "Network Engineer",
+    "Security", "Security Engineer",
+    "Business", "Business Consultant",
+    "Agent",
+] as const;
+
+/**
+ * How often to apply for a promotion, in milliseconds.
+ *
+ * NOT every tick. `applyToCompany` costs 3 GB × 16/4/1 of static RAM and is a game call
+ * per field, and promotion is gated on reputation and skills — neither of which moves
+ * meaningfully between one tick and the next. A minute is frequent enough to catch a
+ * promotion as it becomes available and rare enough that the call does not dominate the
+ * pass.
+ */
+const PROMOTION_INTERVAL_MS = 60_000;
+
+/** When each company was last asked for a promotion, so the cadence is per company. */
+const lastPromotionAttempt = new Map<CompanyName, number>();
+
+/**
+ * Apply at a company, hiring if unemployed and asking for a promotion if not.
+ *
+ * WHY THIS EXISTS AT ALL. `applyToCompany` promotes — the game's own documentation says
+ * so — but the old code only ever called it for an UNEMPLOYED player, because `assignAction`
+ * returned early on `isDoingAction` before reaching here. So a run got its entry-level job
+ * at all nine megacorps, worked one tick at each, settled on one, and stayed an intern
+ * forever: rep accruing at the entry rate, which is the slowest in the game, for the whole
+ * run. The augmentations those factions sell are gated on that rep.
+ *
+ * The two cases are the same call with a different field set, so they share the path:
+ *   - unemployed   try every field, because the right one depends on the stats the run has.
+ *   - employed     ask again in the field the player already holds, which is a promotion
+ *                  application. Trying other fields would be applying for a parallel job,
+ *                  which the game refuses while employed.
+ *
+ * Returns the position name on a successful hire or promotion, or null. The caller uses it
+ * for the log line; the state change is the game's.
+ */
+export function ensureCompanyJob(ns: NS, company: CompanyName, now: number): JobName | null {
+    const current = ns.getPlayer().jobs[company];
+    const fields = current === undefined ? COMPANY_FIELDS : [FIELD_OF_JOB(current)];
+
+    for (const field of fields) {
+        if (field === null) continue;
+        try {
+            const got = ns.singularity.applyToCompany(company, field);
+            if (got !== null) return got;
+        } catch {
+            // A refused application is ordinary; a thrown call means the API is not
+            // answering, which is not worth propagating into the pass.
         }
-        if (!progressed) return;
+    }
+    return null;
+}
+
+/**
+ * The field a held position belongs to, or null when it is not one this applies for.
+ *
+ * `applyToCompany` takes a FIELD and returns the best position in it, so a promotion has
+ * to name the field the player is already in. The game gives no reverse lookup, so this
+ * maps by the position's own name — the positions are the game's fixed strings and each
+ * belongs to exactly one field.
+ *
+ * Null rather than a guess for a position this does not recognise: applying in the wrong
+ * field is a rejected call, and a rejected call every minute for the life of the run is
+ * worse than doing nothing.
+ */
+function FIELD_OF_JOB(job: JobName): (typeof COMPANY_FIELDS)[number] | null {
+    const name = String(job).toLowerCase();
+    if (name.includes("software")) return name.includes("consultant") ? "Software Consultant" : "Software";
+    if (name.includes("network")) return "Network Engineer";
+    if (name.includes("security engineer")) return "Security Engineer";
+    if (name.includes("security")) return "Security";
+    if (name.includes("business")) return name.includes("consultant") ? "Business Consultant" : "Business";
+    if (name.includes("agent")) return "Agent";
+    // `IT` LAST, and matched on a WORD BOUNDARY rather than as a substring.
+    //
+    // `includes("it")` is true for "Waiter", "Part-time Waiter", "Fitness Trainer",
+    // "Accountant" and half the game's unrelated positions — so the earlier version
+    // treated a waiter's job as an IT position and applied for a promotion in a field the
+    // player does not hold. A refused call every minute, for the life of the run.
+    //
+    // Every other branch above is checked first, so by here the only positions left are
+    // ones this feature does not promote. The `IT` match is therefore narrow on purpose.
+    if (/\bit\b/.test(name)) return "IT";
+    return null;
+}
+
+/**
+ * Ask for a promotion at the company being worked for, at most once a minute.
+ *
+ * Separated from `ensureCompanyJob` so the cadence is explicit rather than implied by a
+ * caller. Called from the work path, which runs every tick; the guard inside is what keeps
+ * the game call to one a minute per company.
+ *
+ * Exported for tests. The cadence is the part that cannot be verified by reading
+ * `tick` — it only shows as a count of `applyToCompany` calls over simulated time — and
+ * getting it wrong is either a cost per tick or a promotion that never happens.
+ */
+export function maybePromote(ns: NS, company: CompanyName, now: number): void {
+    const before = ns.getPlayer().jobs[company];
+    // Not employed there: nothing to promote, and the check comes BEFORE the cadence clock
+    // so a company the player does not work at never claims a slot in it.
+    if (before === undefined) return;
+
+    // `?? null` rather than `?? 0`, and the difference is a real bug rather than a style
+    // choice. `Date.now()` is never 0, so defaulting to 0 looked harmless — but it makes
+    // the FIRST attempt depend on the absolute clock: at any moment within the first
+    // minute of epoch time, `now - 0` is below the interval and the promotion is skipped.
+    // A test that drives `now` from 0 sees no attempt at all, which is how this was found.
+    //
+    // Null means "never attempted", which is not a time and must not be compared as one.
+    const last = lastPromotionAttempt.get(company) ?? null;
+    if (last !== null && now - last < PROMOTION_INTERVAL_MS) return;
+    lastPromotionAttempt.set(company, now);
+
+    const got = ensureCompanyJob(ns, company, now);
+    if (got !== null && got !== before) {
+        announce(ns, "PROGRESSION", `Promoted at ${company}: ${before} → ${got}`, "success");
     }
 }
 
@@ -1021,7 +1297,26 @@ interface AugSelectionFilter {
     requireRepGap?: boolean;
 }
 
-function buyAffordableAugments(ns: NS, player: Player, owned: string[], recent: RecentLines): void {
+/**
+ * Buy every unowned augmentation the player can already afford, cheapest check first.
+ *
+ * NO NEUROFLUX GOVERNOR, and it is the only augmentation excluded here. It is skipped
+ * because it is the one augmentation with no ceiling: its reputation requirement and its
+ * price both rise with every copy bought, so it can absorb an unbounded share of a run's
+ * cash. Buying it during the run competes directly with the finite augmentations whose
+ * reputation the run is still farming, and it buys multipliers that are the weakest per
+ * dollar in the game. It is worth buying only at the END, with money that has nowhere
+ * else to go — which is exactly what `retire.ts:buyNeuroFlux` does once a reset is
+ * decided and the queue is about to be installed.
+ *
+ * `neuroflux.test.ts` pins that split. The skip looks like a detail and is not: this loop
+ * is the ONLY path that buys augmentations during a run, so removing the line below
+ * silently turns every run into a NeuroFlux farm.
+ *
+ * Exported for that test alone — nothing else calls it, and `passiveTasks` passes the
+ * locked `owned` list whose mutation-on-purchase the caller relies on.
+ */
+export function buyAffordableAugments(ns: NS, player: Player, owned: string[], recent: RecentLines): void {
     // THE GANG FACTION IS INCLUDED, deliberately.
     //
     // This loop used to skip it, and nothing else bought gang augmentations either — the
@@ -1062,7 +1357,19 @@ function buyAffordableAugments(ns: NS, player: Player, owned: string[], recent: 
     }
 }
 
-function getBestAugmentation(
+/**
+ * The next augmentation worth working toward, or null when none is left.
+ *
+ * NO NEUROFLUX GOVERNOR, for the reason `buyAffordableAugments` gives: it is unbounded
+ * and buys the least per dollar, so it is not a target — it is what a run spends its
+ * leftover cash on once retirement is decided. This function is what `prioritizeAction`
+ * aims at and what `plannedReserve` sets money aside for, so including it here would
+ * make EVERY run farm it: the target would always exist, the reserve would always be
+ * held, and the finite augmentations would never be the thing the run was saving for.
+ *
+ * Exported for `neuroflux.test.ts`, which pins the exclusion at both purchase paths.
+ */
+export function getBestAugmentation(
     ns: NS,
     player: Player,
     owned: readonly string[],
@@ -1302,6 +1609,82 @@ function bestCompany(ns: NS, player: Player): CompanyName | null {
     }) ?? null;
 }
 
+/**
+ * Whether progression must stand down because something else owns the activity slot.
+ *
+ * A BLACK OP owns the slot only when it is SHARED — that is, when the run does not hold
+ * The Blade's Simulacrum. The augment exists to let Bladeburner and the player's own work
+ * proceed at once, so standing down for an op while holding it gives away something the
+ * division never took. This branch used to do exactly that: the augment relaxed the
+ * contract yield below it, and nothing relaxed this one, so a run with the augment still
+ * stopped training during every black op.
+ *
+ * A GRAFT owns the slot unconditionally, augment or not. Simulacrum frees the slot from
+ * BLADEBURNER actions, and grafting is not one; interrupting a graft destroys progress
+ * that cannot be recovered by waiting.
+ *
+ * A FUNCTION RATHER THAN AN INLINE CONDITION, because the composed expression is where
+ * the defect lived: three correct predicates joined by a flag that had been threaded into
+ * one half and not the other. Naming it makes both halves assertable without a whole
+ * `tick` fixture, and makes the asymmetry — `slotsShared` on one side, not the other —
+ * something a reader has to see rather than something buried in an `||` chain.
+ */
+export function yieldsForBlackOpOrGraft(ns: NS, slotsShared: boolean): boolean {
+    if (hasActiveGraft(ns)) return true;
+    return slotsShared && (winnableBlackOp(ns) || hasActiveBlackOp(ns));
+}
+
+/**
+ * Take a job at the megacorp ANY outstanding goal is waiting on, or null.
+ *
+ * WHY IT TAKES THE WHOLE GOAL LIST, which is the difference between this working and
+ * this looking like it works. The first version read only `context.goal` — the head —
+ * and that made the branch dead in practice for the same reason `bestCompany` was: the
+ * head is almost never a megacorp. Recorded runs show it on gang territory, on a faction
+ * stat race, on anything nearer than a join. An employment goal exists the whole time,
+ * sitting in the queue, and nothing ever looked at it.
+ *
+ * `context.goals` exists precisely for this. Its own comment says it is there "so a
+ * feature can ask whether a goal it can advance is outstanding ANYWHERE, not only whether
+ * it is the one currently in front" — and hiring is exactly such a feature: it can only
+ * move employment, and employment cannot be moved by the head's business.
+ *
+ * ORDERED BY THE LIST, which is already ranked nearest-first, so the megacorp the run is
+ * closest to is the one applied for. The loop is bounded by the goal list, which is small
+ * and already materialised.
+ *
+ * Returns null in three ordinary cases, all of which mean "not this function's job":
+ *   - no goal in the list is about employment;
+ *   - the player is already employed at every company that is (nothing to do, and
+ *     re-applying is a no-op);
+ *   - the entry bar is not met yet (`factionTraining` handles the skill gap, and applying
+ *     without the skill is an action the game will refuse anyway).
+ *
+ * Exported for tests. It is the one branch that can close a megacorp goal, and its
+ * failure mode — returning an action it should not, or none when it should — is a silent
+ * regression no recording would show, because the run simply goes back to training.
+ */
+export function hireForGoal(ns: NS, player: Player, goals: readonly Goal[]): PlayerAction | null {
+    for (const goal of goals) {
+        if (goal.kind !== "faction") continue;
+
+        const company = goal.subGoals.find(sub => sub.key === "employed")?.company;
+        if (company === undefined) continue;
+        if (player.jobs[company]) continue;
+
+        // Whether the entry requirement is met. Read from the game rather than assumed:
+        // the goal says "be employed", not "be qualified", and the two are different
+        // states. An unreadable bar is null, which does NOT disqualify — blocking on a
+        // figure that could not be read would mean never applying anywhere.
+        const req = corpHackingReq(ns, company);
+        if (req !== null && player.skills.hacking < req) continue;
+
+        return { kind: "COMPANY", company };
+    }
+
+    return null;
+}
+
 // ─── Training ───
 
 function trackRate(ns: NS, player: Player): void {
@@ -1397,18 +1780,33 @@ function trainForGangFaction(ns: NS, player: Player, faction: FactionName): Play
         : { kind: "GYM", gym: GYM, stat: worst.stat, city: "Sector-12" };
 }
 
-function factionTraining(ns: NS, player: Player): PlayerAction | null {
+/**
+ * Train toward whichever faction is closest, or null when nothing is worth training for.
+ *
+ * Exported for tests, because its relationship with `hireForGoal` is the whole fix for
+ * "megacorps are never worked for": this function must not claim a megacorp entry bar as
+ * a training target, or it pre-empts the branch that can actually hire. That is a
+ * property of the pair, and it is silent when wrong.
+ */
+export function factionTraining(ns: NS, player: Player): PlayerAction | null {
     const gang = getGangFaction(ns);
 
-    const corpReqs: [FactionName, FactionRequirement][] = [];
-    for (const c of MEGACORPS) {
-        const hacking = player.jobs[c] ? null : corpHackingReq(ns, c);
-        if (hacking) corpReqs.push([asFaction(c), { hacking }]);
-    }
+    // THE MEGACORP ENTRIES ARE GONE, and their absence is the fix.
+    //
+    // They used to be synthesized here as pure `hacking` requirements, which made the
+    // chain circular: this function would train hacking toward a megacorp's entry bar,
+    // return a UNI action, and so never reach step 8 where `bestCompany` would actually
+    // APPLY for the job. Qualified forever, employed never.
+    //
+    // Megacorp goals now come from `MEGACORP_REQUIREMENTS` in the objective layer, gated
+    // on `employedBy` rather than on a number. Training cannot satisfy employment, so it
+    // also cannot pre-empt it, and the branch that CAN move it — `hireForGoal`, called
+    // before this — gets its turn.
+    void MEGACORPS;
 
     let best: { action: PlayerAction; gap: number } | null = null;
 
-    for (const [name, req] of [...factionEntries(FACTION_STAT_REQS), ...corpReqs]) {
+    for (const [name, req] of factionEntries(FACTION_STAT_REQS)) {
         if (isMemberOf(player, name) || name === gang) continue;
         if (req.money !== undefined && player.money < req.money) continue;
         if (req.kills !== undefined && player.numPeopleKilled < req.kills) continue;
