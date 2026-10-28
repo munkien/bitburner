@@ -24,7 +24,6 @@ import {
     capApplies,
     noteTraining,
     releaseIfTrainingStopped,
-    clearTrainingClock,
     reset,
     trainCapVerdict,
 } from "./training-cap.ts";
@@ -43,7 +42,8 @@ test("training starts, runs, and is capped at fifteen minutes", () => {
     reset();
     const t0 = 1_000_000;
 
-    assert.equal(trainCapVerdict(t0), "start");
+    noteTraining(t0);
+    assert.equal(trainCapVerdict(t0), "allow", "a reported sighting starts the stretch, so the first verdict is allow");
     assert.equal(trainCapVerdict(t0 + 1_000), "allow");
     // Just short of the cap, still allowed.
     assert.equal(trainCapVerdict(t0 + TRAIN_CAP_MS - 1), "allow");
@@ -55,6 +55,7 @@ test("the cooldown must elapse before training can start again", () => {
     reset();
     const t0 = 2_000_000;
 
+    noteTraining(t0);
     trainCapVerdict(t0);
     const cappedAt = t0 + TRAIN_CAP_MS;
     assert.equal(trainCapVerdict(cappedAt), "capped");
@@ -67,24 +68,12 @@ test("the cooldown must elapse before training can start again", () => {
     assert.equal(trainCapVerdict(cappedAt + TRAIN_COOLDOWN_MS), "start");
 });
 
-test("clearing releases the budget without triggering a cooldown", () => {
-    // The run spent ten minutes training, then went and did faction work. Its patience was
-    // not being spent, so the next stretch must start whole rather than capped one minute in.
-    reset();
-    const t0 = 3_000_000;
-
-    trainCapVerdict(t0);
-    assert.equal(trainCapVerdict(t0 + 600_000), "allow");
-
-    clearTrainingClock();
-    assert.equal(trainCapVerdict(t0 + 600_001), "start");
-});
-
 test("a reset gives back a full budget, as a nexus restart does", () => {
     // The behaviour the memory-only clock is chosen for: restarting the orchestrator is an
     // explicit act and starts the run's patience over.
     reset();
     const t0 = 4_000_000;
+    noteTraining(t0);
     trainCapVerdict(t0);
     assert.equal(trainCapVerdict(t0 + TRAIN_CAP_MS), "capped");
 
@@ -97,6 +86,7 @@ test("the clock covers a stretch, not one stat", () => {
     // run's patience with training, not any single measurement.
     reset();
     const t0 = 5_000_000;
+    noteTraining(t0);
     trainCapVerdict(t0);
     assert.equal(trainCapVerdict(t0 + 600_000), "allow");
     // Ten minutes later the stretch is still the same one, and still ends at the cap.
@@ -113,7 +103,8 @@ test("a brief interruption does NOT reset the training budget", () => {
     noteTraining(t0);
     // The first verdict STARTS the stretch, and it starts it at the time it is called —
     // so it must be called at t0 for the arithmetic below to mean anything.
-    assert.equal(trainCapVerdict(t0), "start");
+    noteTraining(t0);
+    assert.equal(trainCapVerdict(t0), "allow", "a reported sighting starts the stretch, so the first verdict is allow");
 
     // Ten minutes in, a SHORT interruption: one backdoor, under two minutes. The stretch
     // must continue rather than reset.
@@ -134,9 +125,67 @@ test("a genuine stop releases the budget after the interruption window", () => {
     reset();
     const t0 = 7_000_000;
     noteTraining(t0);
+    noteTraining(t0);
     trainCapVerdict(t0);
 
     // No training for longer than the window: the stretch is over.
     releaseIfTrainingStopped(t0 + TRAIN_INTERRUPTION_MS);
     assert.equal(trainCapVerdict(t0 + TRAIN_INTERRUPTION_MS + 1), "start");
+});
+
+test("asking the clock does not start a stretch", () => {
+    // THE LATENT BUG. `trainCapVerdict` was a query with a side effect: on finding no stretch
+    // running it STARTED one. `player.ts:442` asks it from the Bladeburner yield branch, which
+    // is reached on ticks where the player is in a class but progression has stood down — so
+    // merely asking armed the timer. A run that yielded for fifteen minutes and never trained
+    // through the normal path had the cap fire against it, and the class was replaced by a
+    // one-second crime to "release" training that was never budgeted.
+    //
+    // The measured sequence, before the fix:
+    //
+    //   ask at t          -> "start"   (a stretch begins, because it was asked)
+    //   ask at t+14m      -> "allow"
+    //   ask at t+15m      -> "capped"  (the class is released)
+    //
+    // So a question decided a fact. This pins the separation: asking never starts a stretch,
+    // only reporting training does.
+    reset();
+    const t0 = 9_000_000;
+
+    // NEVER report training. Only ask, repeatedly, for far longer than the cap.
+    assert.equal(trainCapVerdict(t0), "start");
+    assert.equal(
+        trainCapVerdict(t0 + 14 * 60_000),
+        "start",
+        "asking for fourteen minutes produced a running stretch",
+    );
+    assert.equal(
+        trainCapVerdict(t0 + TRAIN_CAP_MS),
+        "start",
+        "the clock reached the cap from being asked, with no training reported between the asks",
+    );
+    assert.equal(
+        trainCapVerdict(t0 + 2 * TRAIN_CAP_MS),
+        "start",
+        "asking for long enough started a stretch, so a question decided a fact",
+    );
+});
+
+test("a stretch begins when training is actually reported", () => {
+    // The other side: the cap still has to arm. `noteTraining` is the one call that says "this
+    // is training happening now", so it is the one that starts the clock.
+    reset();
+    const t0 = 10_000_000;
+
+    noteTraining(t0);
+    noteTraining(t0);
+    assert.equal(trainCapVerdict(t0), "allow", "a reported sighting starts the stretch, so the first verdict is allow");
+    noteTraining(t0 + 600_000);
+    assert.equal(trainCapVerdict(t0 + 600_000), "allow");
+    noteTraining(t0 + TRAIN_CAP_MS);
+    assert.equal(
+        trainCapVerdict(t0 + TRAIN_CAP_MS),
+        "capped",
+        "fifteen minutes of REPORTED training did not trip the cap",
+    );
 });

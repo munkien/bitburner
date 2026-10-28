@@ -89,10 +89,19 @@ export function trainCapVerdict(now: number = Date.now()): CapVerdict {
     // as started, so the next stretch begins cleanly once it expires.
     if (cappedAt > 0 && now - cappedAt < TRAIN_COOLDOWN_MS) return "capped";
 
-    if (startedAt <= 0) {
-        startedAt = now;
-        return "start";
-    }
+    // NO STRETCH RUNNING: nothing has been reported, so there is nothing to cap yet.
+    //
+    // `"start"` is reported so the caller can see the clock begin, but it NO LONGER STARTS
+    // ONE — that was the side effect that made a question decide a fact. `player.ts:442` asks
+    // from the Bladeburner yield branch, so merely asking armed the timer: a run that yielded
+    // for fifteen minutes without training had the cap fire against it and its class replaced
+    // by a one-second crime to "release" training it had never budgeted.
+    //
+    // `noteTraining` is the one call that means training is happening, so it is the one that
+    // arms the clock. A caller that reports a sighting and then asks gets `"allow"`, because a
+    // stretch is now running; a caller that only asks gets `"start"` forever, which is the
+    // honest answer when nothing has been reported.
+    if (startedAt <= 0) return "start";
 
     if (now - startedAt < TRAIN_CAP_MS) return "allow";
 
@@ -102,19 +111,13 @@ export function trainCapVerdict(now: number = Date.now()): CapVerdict {
 }
 
 /**
- * Forget the clock, as when training stops for a reason other than the cap.
+ * Forget the budget, clearing BOTH the running stretch and the cooldown.
  *
- * The cap is the run's patience with TRAINING. When the run stops training for its own
- * reasons — the target was reached, the goal moved on — that patience is not being spent,
- * and carrying a half-used budget into the next stretch would cap the second one early.
- * Called by the caller when what it chose is not training.
+ * `clearTrainingClock` used to sit beside this with an identical body and a comment claiming
+ * a production caller that no longer existed — `releaseIfTrainingStopped` superseded it and
+ * the comment never followed. Two exports doing the same thing is not a choice a caller can
+ * make, so the dead one is gone.
  */
-export function clearTrainingClock(): void {
-    startedAt = 0;
-    cappedAt = 0;
-}
-
-/** Forget everything. Exported for tests, like the other features' resets. */
 export function reset(): void {
     startedAt = 0;
     cappedAt = 0;
@@ -140,6 +143,9 @@ export const TRAIN_INTERRUPTION_MS = 2 * 60_000;
  */
 export function noteTraining(now: number = Date.now()): void {
     lastTrainedAt = now;
+    // THE ONLY PLACE A STRETCH STARTS, as of the fix above. Reporting training is the one
+    // event that means patience is being spent, so it is the one that arms the clock.
+    if (startedAt <= 0) startedAt = now;
 }
 
 /**
