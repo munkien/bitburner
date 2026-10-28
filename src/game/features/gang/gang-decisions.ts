@@ -413,7 +413,11 @@ export function decideMode(
     // RECRUITING OUTRANKS POVERTY. Respect gates recruitment, so a gang that stops
     // earning it stops growing — and a small gang earns less for the rest of the run.
     // See `recruitingPhase` for why this is read here AND in `decideWarfare`.
-    if (!c.recruitingPhase && netWorth < c.moneyFloor * MONEY_PANIC_FRACTION) {
+    //
+    // AND AN UNREACHABLE FLOOR IS NOT A FLOOR. See `floorIsReachable`: a gang pinned to money
+    // for a figure thirteen thousand times its net worth never earns its way out, so the rule
+    // that was meant to trade respect for income trades it for nothing, permanently.
+    if (!c.recruitingPhase && floorIsReachable(c.moneyFloor, netWorth) && netWorth < c.moneyFloor * MONEY_PANIC_FRACTION) {
         return { mode: "MONEY", reason: "below-money-floor" };
     }
 
@@ -441,7 +445,7 @@ export function decideMode(
     // The RECRUITING override applies here too, not only at the panic gate above: this is
     // the check that actually fires for a run between the two thresholds, and guarding
     // only the panic gate left a growing gang told to earn money anyway.
-    if (!c.recruitingPhase && netWorth < c.moneyFloor) {
+    if (!c.recruitingPhase && floorIsReachable(c.moneyFloor, netWorth) && netWorth < c.moneyFloor) {
         if (wantedNeedsAttention(g, c, wantedEngaged)) {
             return { mode: "WANTED", reason: "wanted-cleanup" };
         }
@@ -683,6 +687,152 @@ export function chooseGear(
 export const WANTED_LEVEL_FLOOR = 1;
 
 /**
+ * How long a cleanup crew keeps its members after the level stops needing them.
+ *
+ * THE SIZE PROBLEM, in milliseconds. A crew is assigned on one game tick and released on the
+ * next, so a crew that works is on for one tick in two — the smallest possible duty cycle —
+ * and releasing, however well justified, is immediately followed by re-sending. Measured in
+ * `runs/2026-10-28T05.21.21`, deduplicated to real game ticks, for the whole session:
+ *
+ *   417  cleaners=11  rate=-0.50    crew on, level falling  -> release is CORRECT
+ *   560  cleaners=0   rate=+0.51    crew off, level climbs  -> re-send is CORRECT
+ *   429  cleaners=11  rate=-0.50
+ *   558  cleaners=0   rate=+0.51
+ *
+ * Every individual decision there is right; the sequence is not. What is missing is a
+ * commitment that outlasts one tick, so a crew is kept long enough to be worth the switch in
+ * both directions. The level falls about 1.5 per tick with eleven members on it, and climbs
+ * back about 0.52 per tick with nobody on it, so a crew held for a few ticks gets the level
+ * down and a crew stood down for a few ticks lets it stay down. Without a hold the crew simply
+ * pays for its own churn in lost economic work and never nets a fall.
+ *
+ * THE SAME SHAPE AS `trainingWantedHeld`, for the same reason: a decision whose input the
+ * decision itself changes flickers unless the answer is latched for longer than the input's
+ * period. Longer than the ~2 s game tick by a wide margin, and short enough that a real
+ * reduction of the level is still noticed promptly.
+ */
+export const WANTED_HOLD_MS = 60_000;
+
+/**
+ * Whether the money floor is close enough to be worth trading respect for.
+ *
+ * A FLOOR YOU CANNOT REACH IS NOT A FLOOR, it is a permanent instruction. The money checks
+ * below return MONEY whenever net worth is under `moneyFloor`, on the reasoning that respect
+ * is worth less than income at that point. That reasoning holds while the gap is one the gang
+ * can close; it does not hold when the gap is three or four orders of magnitude, because the
+ * gang then spends the rest of the run working for money it will never have and never returns
+ * to the respect phase at all.
+ *
+ * MEASURED. `runs/2026-10-28T08.14.44` ran a 12-member gang at its size cap with a peak net
+ * worth of 7.7e6 against a 1e11 floor — thirteen thousand times short — and the mode log holds
+ * exactly one line for the whole session: `MONEY:below-money-floor`. In MONEY the score is
+ * `100*log10(money)`, so a task earning no money scores about zero however much respect it
+ * brings; TERRORISM earns no money and carries the highest baseRespect of any combat task, and
+ * the run never selected it once. The floor did not make the gang richer, it deleted a task.
+ *
+ * THE BAND IS DELIBERATELY GENEROUS. This is not a tuning knob: it says "the goal is absurd for
+ * this gang", not "the goal is a bit far". A gang within `MONEY_FLOOR_REACH` of its floor still
+ * earns, so the rule still does its job in every ordinary case — including the one pinned by
+ * `recruiting-phase.test.ts` ("a grown gang does enter money mode when poor").
+ */
+export function floorIsReachable(moneyFloor: number, netWorth: number): boolean {
+    if (!Number.isFinite(moneyFloor)) return true;
+    if (!(moneyFloor > 0)) return true;
+    return netWorth * MONEY_FLOOR_REACH >= moneyFloor;
+}
+
+/**
+ * How far below the money floor still counts as a reachable target.
+ *
+ * 100 means a gang must be within two orders of magnitude of its floor to be told to earn.
+ * Beyond that the floor is a number nobody chose for this gang — it is the run's wealth goal
+ * applied to a gang whose own income cannot approach it — and obeying it costs every productive
+ * task that earns no money.
+ */
+export const MONEY_FLOOR_REACH = 100;
+
+/**
+ * How many consecutive readings at the floor it takes to end a commitment.
+ *
+ * TWO, not one and not a timer. One reading can be the bounce — the recorded loop is
+ * 3 -> 1 -> 6 -> 3, and the same game tick is read twice — so a single frame must not release
+ * a crew. Two consecutive readings at a level the game clamps means the crew is achieving
+ * nothing, and a fixed-duration commitment that ignores it keeps the whole gang on a no-op.
+ * Replayed over `runs/2026-10-28T05.44.43`, ignoring it cost 1631 frames of cleanup at a level
+ * of 1.
+ */
+export const FLOOR_RELEASE_READINGS = 2;
+
+/**
+ * What the wanted level has been doing over the last few minutes.
+ *
+ * THE QUESTION THE FLOOR SHOULD HAVE BEEN ASKING. Every rule this replaced asked about a
+ * single reading — is the rate positive, did the level fall, has the commitment expired — and
+ * all of them are satisfied by a level that oscillates while going nowhere. `runs/2026-10-28T08.14.44`
+ * is exactly that: 11 of 12 members on cleanup for 83% of frames, holding a level whose
+ * rolling mean is 3.83 -> 3.81 -> 3.80 across the run. Flat to two decimal places.
+ *
+ * A crew is worth its cost only if the level is actually drifting up. Holding a level where it
+ * already is means the crew has succeeded and should be released — the members earn more
+ * somewhere else, and the level does not care.
+ *
+ *   rising   the level over the window is meaningfully above where it started
+ *   stable   it has not moved much either way — the crew is doing its job, or need not exist
+ *   falling  it is meaningfully below where it started
+ *
+ * `stable` and `falling` are treated the same by the caller: neither needs a crew.
+ */
+export type WantedTrend = "rising" | "stable" | "falling";
+
+/**
+ * How far the level must drift across the window to count as rising rather than stable.
+ *
+ * A FRACTION rather than absolute points, because the noise and the level scale together — the
+ * recorded swings are ~5.9 points on a level of ~6, and a fixed band would mean opposite things
+ * on a gang at 6 and a gang at 600. 25% over the window is well outside the recorded noise,
+ * which nets to zero across a window even though it swings hugely within one.
+ */
+export const WANTED_TREND_MARGIN = 0.25;
+
+/**
+ * Classify a series of wanted-level readings, oldest first.
+ *
+ * COMPARES THE WINDOW'S OWN START AND END rather than fitting a line. A line through a
+ * square wave fits zero slope, which is the right answer here and would be reached by both
+ * methods; the endpoint comparison is chosen because it is the one a reader can check against
+ * the numbers, and because a regression through a bouncing series invites reading precision
+ * into the bounce that is not there.
+ *
+ * The END is the mean of the last few readings, not the single last one, so one reading on the
+ * wrong side of the bounce cannot decide the trend — the same lesson as `FLOOR_RELEASE_READINGS`
+ * and the commitment before it, applied to the measurement rather than the decision.
+ *
+ * Fewer than `minSamples` readings returns `stable`: with no history there is no evidence of a
+ * rise, and the caller spends members only on evidence.
+ */
+export function wantedTrend(
+    readings: readonly number[],
+    margin: number = WANTED_TREND_MARGIN,
+    minSamples = 4,
+): WantedTrend {
+    const usable = readings.filter(r => Number.isFinite(r));
+    if (usable.length < minSamples) return "stable";
+
+    // The first and last few, averaged, so the endpoints are not single samples.
+    const edge = Math.max(1, Math.floor(usable.length / 4));
+    const start = usable.slice(0, edge).reduce((a, b) => a + b, 0) / edge;
+    const end = usable.slice(-edge).reduce((a, b) => a + b, 0) / edge;
+
+    // Scale the margin by the level itself, floored at 1 so a gang sitting at the game's
+    // bottom cannot produce a band so small that rounding decides the answer.
+    const band = Math.max(1, Math.abs(start)) * margin;
+
+    if (end - start > band) return "rising";
+    if (start - end > band) return "falling";
+    return "stable";
+}
+
+/**
  * Whether the wanted level needs attention at all.
  *
  * True while the penalty is below target AND the level can still come down, or
@@ -834,11 +984,6 @@ export function bestCleanupRate(rates: readonly number[]): number {
 /**
  * How many members it takes to HOLD the wanted level, in any mode.
  *
- * THE FLOOR, as distinct from `wantedWorkersFor`. That one answers "how much of the gang
- * should we spend on cleanup as a mode"; this answers "how many must be on it for the level
- * not to rise", and it is asked in every mode because a rising level is never a good trade.
- * See `wanted-hold.test.ts` for why that is a rule rather than a ranking.
- *
  * `risePerCleaner` is the BEST member's rate, not the mean. The mean over the whole gang is
  * what the pressure line reports, and sizing from it is wrong in a way that hides itself: a
  * gang of nine whose one capable cleaner removes 1.5 per cycle reports 0.17, so holding a
@@ -850,6 +995,165 @@ export function bestCleanupRate(rates: readonly number[]): number {
  * gang that cannot clean still sends one, because sending nobody is an explicit decision to
  * let the level climb while looking like a considered one.
  */
+/**
+ * How many members the wanted floor requires, given whether it was already holding.
+ *
+ * WHY THIS IS A LATCH AND NOT AN ARITHMETIC ANSWER. `wantedRise` adds the current cleaners
+ * back to the net rate, so the figure a crew is sized from MOVES WHEN THE CREW IS ASSIGNED.
+ * Asking the question fresh every tick therefore chases its own tail:
+ *
+ *   one cleaner working   net -1.5 from a +1 rise -> rise reads 0 -> floor releases them
+ *   nobody working        net +1.0               -> rise reads 1 -> floor re-sends them
+ *
+ * One member, alternating between Vigilante Justice and their economic task every game tick.
+ * That is the reported flicker, and it was introduced by making cleanup a floor rather than a
+ * mode: a mode was stable because it was decided from the penalty, which cleanup does not move
+ * within a tick.
+ *
+ * So the requirement LATCHES. Once engaged it stays engaged until the level has actually come
+ * down — the only evidence cleanup worked, and the one thing no assignment can fake. The same
+ * shape as `trainingWantedHeld`, for the same reason: a handover driven by an input that the
+ * handover changes is a handover driven by noise.
+ *
+ * At the floor there is no requirement at all, whatever the rate says: the game clamps the
+ * level at 1, so a member sent to clean up there achieves nothing.
+ */
+export function holdRequirement(
+    p: {
+        /** The gang's wanted level, exactly as the game reports it. */
+        readonly level: number;
+        /** The NET rate, cleaners included. */
+        readonly netRate: number;
+        readonly cleaners: number;
+        readonly bestRate: number;
+    },
+    /**
+     * The level the floor engaged at, or null when it is not holding.
+     *
+     * The level itself rather than a bare boolean, because releasing needs a comparison and
+     * there is nothing else to compare against. `engaged` alone cannot tell "still climbing"
+     * from "coming down": both have a positive rate whenever a cleaner is holding the line.
+     */
+    engagedAt: number | null,
+    /**
+     * When the crew is committed until, in ms, or 0 when it is not.
+     *
+     * THE COMMITMENT HALF. Releasing correctly is not enough: a crew assigned on one game tick
+     * and released on the next is on for one tick in two, and the re-send follows immediately
+     * however right each individual decision was. See `WANTED_HOLD_MS`.
+     */
+    holdUntil = 0,
+    /** The current time in ms. A parameter so this stays pure and testable. */
+    now = 0,
+    /**
+     * The crew size latched when the crew was engaged, or 0 when it is not.
+     *
+     * Carried separately from `p.cleaners`, which is re-read every tick and follows whoever
+     * happens to be on the task. A commitment to a size has to be to a NUMBER, or it changes
+     * with the reading it was meant to stabilize.
+     */
+    committedCrew = 0,
+    /**
+     * How many CONSECUTIVE readings the level has been at or below the floor, 0 when it is not.
+     *
+     * The floor needs a voice that survives one bad frame but not two. One reading can be
+     * noise — the same game tick is read twice, and the level genuinely bounces — so a single
+     * frame at the floor must not tear a commitment down (that is the regression this function
+     * already went through once). Two consecutive readings at the bottom of the scale is not
+     * noise, it is the situation, and a crew there achieves nothing.
+     *
+     * Without this the commitment kept the gang on cleanup for its whole span: replayed over
+     * `runs/2026-10-28T05.44.43`, cleaning went from 49% of frames to 93% with 1631 of them at
+     * a level of 1. A blind timer resolves "don't react to one frame" against "stop when there
+     * is nothing to do" the wrong way.
+     */
+    atFloorReadings = 0,
+    /**
+     * What the level has been doing over the last few minutes. See `wantedTrend`.
+     *
+     * `undefined` means "not measured", which keeps the previous behaviour rather than silently
+     * switching cleanup off for a caller that has no history.
+     */
+    trend?: WantedTrend,
+): number {
+    // NOTHING TO DEFEND: the long-term level is not climbing.
+    //
+    // AHEAD OF every single-reading test, because all of those are satisfied by a level that
+    // oscillates while going nowhere. This is the operator's rule stated plainly — keep the
+    // long-term level stable or falling, rather than actively cleaning up — and it is the one
+    // question that would have caught `runs/2026-10-28T08.14.44`, where 11 of 12 members held a
+    // level whose rolling mean was flat to two decimal places (3.83 -> 3.81 -> 3.80).
+    //
+    // BUT NOT AHEAD OF THE COMMITMENT, and getting that wrong is this rule's own version of the
+    // bug it was written to fix. The trend is a WINDOW measurement, but a short window over a
+    // bouncing series still flips: replaying the recorded ticks 3 -> 1 -> 6 -> 3 through the
+    // module, the trend went stable, rising, stable, rising on consecutive readings, and each
+    // `stable` returned 0 — which the caller reads as "release" and acts on by clearing the
+    // latch. A commitment with seventy seconds left was destroyed every third reading.
+    //
+    // So the commitment outranks the trend, exactly as it outranks the single reading. Once a
+    // crew is out it stays out for its span; the trend decides whether to ENGAGE, and what to
+    // do when the span expires. That is the whole point of a commitment: it is not a promise
+    // that the readings will keep agreeing, it is a promise that this module will stop
+    // re-deciding.
+
+    // THE ORDER OF THESE THREE IS THE DESIGN, so it is stated once.
+    //
+    //   1. the floor streak   the only thing that cuts a commitment short — the crew is at a
+    //                         level the game clamps and cannot achieve anything
+    //   2. the commitment     holds the size it latched, whatever the readings now say
+    //   3. the trend          decides whether to engage, and what to do once the span expires
+    //
+    // Each of the three has, at some point this session, been placed above the one it now sits
+    // below, and each misplacement produced a flicker with a different period: a single frame at
+    // the floor tore the latch down (two-second flip), and a short trend window doing the same
+    // produced a ten-second one. The rule they share: nothing that can be moved by one reading
+    // may release a crew, and only the floor — which is a fact about the game's clamp rather
+    // than a trend — may cut one short.
+
+    // 1. At the floor long enough that it is the situation and not the bounce.
+    if (atFloorReadings >= FLOOR_RELEASE_READINGS) return 0;
+
+    // 2. Committed: keep the SIZE, not just the decision. Returning `cleaners` here still tracks
+    // the reading every tick, and the crew churns 12 -> 11 -> 1 -> 11 because of it.
+    if (holdUntil > now) return Math.max(1, committedCrew > 0 ? committedCrew : p.cleaners);
+
+    // 3. Nothing to defend: the long-term level is not climbing.
+    if (trend === "stable" || trend === "falling") return 0;
+
+    // At the floor there is nothing to achieve: the game clamps the level, so a member sent to
+    // clean up here changes nothing whatever the rate says.
+    if (!(p.level > WANTED_LEVEL_FLOOR)) return 0;
+
+    // Not engaged: engage on a genuine rise, sized from what the rest of the gang adds.
+    if (engagedAt === null) {
+        const rise = Math.max(0, p.netRate + p.cleaners * p.bestRate);
+        if (!(rise > 0)) return 0;
+        if (!(p.bestRate > 0)) return 1;
+        return Math.max(1, Math.ceil(rise / p.bestRate));
+    }
+
+    // Engaged, commitment expired: release only on evidence the level is genuinely coming down.
+    //
+    // "The level is lower than when we engaged" was the first rule, and `runs/2026-10-28T05.21.21`
+    // shows what it does: 417 -> 560 -> 429 -> 558, a hundred-point swing as the crew arrived
+    // and left. Every release was justified by the level being below where it engaged, which
+    // the ASSIGNMENT caused rather than the outcome. The body was measuring the thing it
+    // changed.
+    //
+    // Neither signal is enough alone. `netRate` is measured WITH the crew in place, so a
+    // negative rate is equally consistent with "the crew is winning" and "the crew is holding a
+    // rise back", and releasing on it alone stands down a crew that is doing its job. A level
+    // below the engagement point is equally consistent with real progress and with one tick of
+    // noise.
+    //
+    // Both together is the evidence: the level has come down from where the crew engaged AND it
+    // is still falling with them on it. That is cleanup having worked rather than cleanup
+    // having happened.
+    if (p.level < engagedAt && p.netRate < 0) return 0;
+    return Math.max(1, p.cleaners);
+}
+
 export function wantedHoldWorkers(risePerCycle: number, risePerCleaner: number, total: number): number {
     if (total <= 0) return 0;
     if (!(risePerCycle > 0)) return 0;
@@ -900,19 +1204,15 @@ export function wantedWorkersFor(
 /**
  * Whether another member should be put on wanted cleanup.
  *
- * Takes the gang's info and size rather than a bare penalty, because the decision
- * depends on which way the level is moving, not only on how bad it is.
+ * DELETED, and this note is the reason it stays deleted. It was
+ * `assigned < wantedWorkersFor(...)` — six parameters, no behaviour of its own. A caller
+ * that wants to know whether another member is needed writes the comparison, and learns
+ * what it is actually asking. Keeping a name for an operator is what makes an interface
+ * look deeper than the implementation behind it.
+ *
+ * The `Pick<GangGenInfo, ...>` it took was also narrower than its job: it accepted only
+ * three fields of the gang, which reads as a promise that those are all that matter.
  */
-export function wantedWorkerNeeded(
-    assigned: number,
-    total: number,
-    g: Pick<GangGenInfo, "wantedLevel" | "wantedLevelGainRate" | "wantedPenalty">,
-    p: WantedPressure,
-    c: GangConfig,
-    engaged = false,
-): boolean {
-    return assigned < wantedWorkersFor(g, p, total, c, engaged);
-}
 
 /**
  * Whether the gang should keep a member pinned to territory at all.

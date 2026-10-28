@@ -106,3 +106,37 @@ test("the two decisions agree about the money floor, not about each other", () =
         );
     }
 });
+
+test("a gang at its size cap is never pinned to money by an unreachable floor", () => {
+    // THE RECORDED DEFECT. `runs/2026-10-28T08.14.44`, whole session: 12 members (the cap),
+    // `recruitingPhase: false`, peak net worth 7.7e6 against a `moneyFloor` of 1e11 — thirteen
+    // thousand times short. `decideMode` therefore returned MONEY on every tick, and the mode
+    // log shows exactly one line for the entire run:
+    //
+    //   MODE: MONEY:below-money-floor (respect=3.19M/never power=247 wanted=100.0% ...)
+    //
+    // Note `respect=3.19M/never`: `respectForNextRecruit` is Infinity at the size cap, so the
+    // respect phase never ends — the gang is finished growing and should be banking respect and
+    // money both. Instead it was told to chase money it could not reach, forever.
+    //
+    // WHAT IT COST. In MONEY the score is `100*log10(money) + ...`, so a task earning NO money
+    // scores about zero however much respect it brings. TERRORISM earns no money and has the
+    // highest baseRespect of any combat task (0.01, fifty times Human Trafficking's 0.0002) —
+    // it is the gang's single best respect task, and the run never used it once. The
+    // assignments over the whole session were Vigilante Justice, Human Trafficking and
+    // Traffick Illegal Arms, and nothing else.
+    //
+    // A floor that cannot be reached is not a floor, it is a permanent instruction. Once the
+    // gang can no longer grow, money is no longer the thing standing between it and everything
+    // else, so the unreachable-floor rule must not override the respect phase.
+    const cfg = { ...GANG_CONFIG_DEFAULT, recruitingPhase: false, moneyFloor: 1e11 };
+    const atCap = gang({ respectForNextRecruit: Infinity, respect: 3.19e6 });
+
+    const { mode } = decideMode(atCap, cfg, false, ENEMIES, 7.7e6);
+    assert.notEqual(
+        mode,
+        "MONEY",
+        "a gang at its size cap was pinned to money mode by a floor it cannot reach",
+    );
+
+});

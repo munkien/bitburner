@@ -26,9 +26,7 @@ import {
     skillScore,
     territoryLockHeld,
     trainingTask,
-    wantedHoldWorkers,
     wantedRise,
-    wantedWorkerNeeded,
     wantedWorkersFor,
     type EnemyScan,
     type EquipmentInfo,
@@ -38,6 +36,7 @@ import {
     type Special,
     type WantedPressure,
 } from "./gang-decisions.ts";
+import { WantedFloor } from "./wanted-floor.ts";
 
 
 // ============================================================
@@ -311,6 +310,23 @@ const activeTrainers = new Set<string>();
 let standingTerritoryMember: string | null = null;
 
 /**
+ * The wanted level the cleanup floor latched at, or null when it is not holding.
+ *
+ * THE LATCH THAT STOPS THE FLIP. The crew size cannot be re-derived from the net wanted rate
+ * every tick, because that rate already includes the cleaners the crew sent — so assigning a
+ * cleaner removes the need for one, and releasing it restores the need. Measured as the
+ * reported symptom: one member alternating between Vigilante Justice and Human Trafficking
+ * every game tick.
+ *
+ * Module state, like the territory pin, because it is memory across ticks: "how long has this
+ * been going on" is the whole question, and a per-tick value has no answer to it. Held as the
+ * LEVEL rather than a boolean so release is measurable — cleanup worked when the level is
+ * lower than it was, and nothing else is evidence.
+ */
+/* The wanted-floor memory now lives in `WantedFloor` — see `wanted-floor.ts`. */
+const wantedFloor = new WantedFloor();
+
+/**
  * Forget everything this feature remembers between ticks.
  *
  * Exported for tests, like the `reset` on the other long-lived features, and it exists
@@ -446,17 +462,33 @@ export function tick(ns: NS, context: Context): void {
     // so the reported crew and the assigned crew come from one measurement.
     const wantedPressure = wantedPressureFor(gang, g, members, specials);
 
-    // How many members the level needs to hold. Computed BEFORE the log line so the line can
-    // report the crew the run actually acts on — the mode-based figure and the floor are
-    // different numbers, and printing only the first is how the gap went unnoticed.
-    const wantedHoldCrew = wantedHoldWorkers(
-        wantedRise(wantedPressure),
-        wantedPressure.bestCleanupRate,
-        members.length,
+    // How many members the level needs to hold, from the LATCHED requirement.
+    //
+    // NOT re-derived from `wantedRise` each tick, which is what caused the reported flip
+    // between Vigilante Justice and Human Trafficking: that figure adds the current cleaners
+    // back to the net rate, so assigning a cleaner removes the need for one and releasing it
+    // restores the need. See `holdRequirement` — the requirement latches until the level has
+    // actually fallen, and `wantedHoldSince` is the level it latched at.
+    const now = Date.now();
+
+    // THE WANTED FLOOR, through its own interface.
+    //
+    // This used to be five module-level latches maintained here, an engage/release protocol
+    // written out inline, and an eight-parameter call to `holdRequirement`. All of it was the
+    // decision's own memory and its own protocol, so all of it moved into `WantedFloor`.
+    // What is left is a reading in and a crew out.
+    const crew = wantedFloor.crewFor(
+        {
+            level: g.wantedLevel,
+            netRate: g.wantedLevelGainRate,
+            cleaners: wantedPressure.cleaners,
+            bestRate: wantedPressure.bestCleanupRate,
+            members: members.length,
+        },
+        now,
     );
-    const wantedHoldReason = wantedPressure.bestCleanupRate > 0
-        ? "wanted floor"
-        : "wanted floor (no cleaner can make progress)";
+    const wantedHoldCrew = crew.size;
+    const wantedHoldReason = crew.reason;
 
     log.change(
         "wanted-pressure", "WANTED-PRESSURE",
@@ -666,7 +698,7 @@ export function tick(ns: NS, context: Context): void {
             continue;
         }
 
-        if (mode === "WANTED" && wantedWorkerNeeded(wantedWorkers, members.length, g, wantedPressure, config, wantedEngaged)) {
+        if (mode === "WANTED" && wantedWorkers < wantedWorkersFor(g, wantedPressure, members.length, config, wantedEngaged)) {
             assign(m.name, specials.wanted, "wanted cleanup");
             wantedWorkers++;
             continue;
