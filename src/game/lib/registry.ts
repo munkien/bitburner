@@ -1,4 +1,5 @@
 import type { FeatureMeta } from "./features.ts";
+import { HACKTOCRACY_BITNODE, always, exceptIn } from "./features.ts";
 import { SLEEVE_MOVABLE, type Participation } from "./objective.ts";
 
 /*
@@ -30,7 +31,7 @@ export const FEATURES: readonly FeatureMeta[] = [
         id: "hacking",
         name: "Hacking",
         path: "./features/hacking/hacking.ts",
-        priority: 10,
+        priority: always(10),
         // The only feature that needs sub-second ticks. It launches batches on a
         // 40 ms spacing, and a batch is launched when `now` reaches the planned
         // landing time, so a slower tick would launch late and drift the pipeline
@@ -46,7 +47,7 @@ export const FEATURES: readonly FeatureMeta[] = [
         id: "home",
         name: "Home & TOR",
         path: "./home.ts",
-        priority: 20,
+        priority: always(20),
         intervalMs: SECOND,
         // Buying and downloading programs is a Singularity action. Without it
         // the feature has nothing to do, so it is not loaded at all.
@@ -57,7 +58,7 @@ export const FEATURES: readonly FeatureMeta[] = [
         id: "stocks",
         name: "Stock Market",
         path: "./features/stocks/stocks.ts",
-        priority: 30,
+        priority: always(30),
         intervalMs: 6 * SECOND,
         requires: ["stocks"],
         // The market follows its own net-worth tiers rather than the run's goal, but it
@@ -69,7 +70,7 @@ export const FEATURES: readonly FeatureMeta[] = [
         id: "progression",
         name: "Progression",
         path: "./features/player/player.ts",
-        priority: 40,
+        priority: always(40),
         intervalMs: SECOND,
         requires: ["singularity"],
         // The feature that trains stats, farms karma and kills, and works for faction
@@ -82,7 +83,7 @@ export const FEATURES: readonly FeatureMeta[] = [
         path: "./grafting.ts",
         // After progression: a graft is a fallback for augmentations the player
         // already has elsewhere, not the main way to acquire them.
-        priority: 42,
+        priority: always(42),
         intervalMs: MINUTE,
         requires: ["grafting"],
         // Grafting buys augmentations, which is not a goal measurement in the run's
@@ -93,7 +94,7 @@ export const FEATURES: readonly FeatureMeta[] = [
         id: "bladeburner",
         name: "Bladeburner",
         path: "./features/bladeburner/bladeburner.ts",
-        priority: 50,
+        priority: always(50),
         intervalMs: 5 * SECOND,
         requires: ["bladeburner"],
         // Raises combat stats and rank, so it can move the combat floor. Rank is not a
@@ -133,7 +134,7 @@ export const FEATURES: readonly FeatureMeta[] = [
         id: "gang",
         name: "Gang",
         path: "./features/gang/gang.ts",
-        priority: 60,
+        priority: always(60),
         intervalMs: 2 * SECOND,
         requires: ["gang"],
         // The gang earns money, grows its own respect, and takes territory. All three are
@@ -147,7 +148,7 @@ export const FEATURES: readonly FeatureMeta[] = [
         // Last, because retirement ends the run: anything with real work left should
         // have its turn before this decides the run is finished. Its own cadence is a
         // minute, so the ordering costs nothing when it is waiting.
-        priority: 110,
+        priority: always(110),
         intervalMs: MINUTE,
         requires: ["singularity"],
         // Retirement ends the run; it advances no goal.
@@ -157,7 +158,7 @@ export const FEATURES: readonly FeatureMeta[] = [
         id: "sleeves",
         name: "Sleeves",
         path: "./features/sleeves/sleeves.ts",
-        priority: 20,
+        priority: always(20),
         intervalMs: 5 * SECOND,
         requires: ["sleeves"],
         // One definition, read by this file and by the sleeves feature itself, so the two
@@ -176,7 +177,7 @@ export const FEATURES: readonly FeatureMeta[] = [
         id: "share",
         name: "Share",
         path: "./share.ts",
-        priority: 150,
+        priority: always(150),
         intervalMs: 5 * SECOND,
         requires: [],
         // Sharing boosts faction reputation, which is the whole point of the feature; now
@@ -187,7 +188,14 @@ export const FEATURES: readonly FeatureMeta[] = [
         id: "cloud",
         name: "Cloud Fleet",
         path: "./cloud.ts",
-        priority: 90,
+        // DEAD LAST IN HACKTOCRACY, because it cannot run there at all: BitNode 9 sets
+        // `CloudServerLimit: 0`, so there are no servers to buy. The feature is still
+        // admitted (the capability rule only excludes BitNode 8), so its priority decides
+        // how much home RAM it claims ahead of Hacknet before discovering it has nothing to
+        // do — and in that node home RAM costs five times as much. Dropping it below
+        // everything else costs nothing where it does work and stops it displacing the
+        // node's actual income.
+        priority: exceptIn(HACKTOCRACY_BITNODE, 250, 90),
         intervalMs: SECOND,
         // BitNode 8 has no server-based income: its only money is the stock
         // market, so a cloud fleet of workers has nothing to farm there.
@@ -198,7 +206,17 @@ export const FEATURES: readonly FeatureMeta[] = [
         id: "hacknet",
         name: "Hacknet",
         path: "./hacknet.ts",
-        priority: 100,
+        // FIRST IN HACKTOCRACY, and that is the whole point of the node. Hacknet Server is
+        // what BitNode 9 unlocks, SF9 makes it cheaper and more productive, and the node
+        // takes hacking apart everywhere else: `ScriptHackMoney: 0.1`, `HackExpGain: 0.05`,
+        // `HackingLevelMultiplier: 0.5`. So the default order spends the run's home RAM on
+        // features that the node's multipliers have gutted, while the one mechanic it
+        // boosts waits at number 100.
+        //
+        // Ahead of everything except Backdoor/Home at 20, which are cheap one-offs rather
+        // than ongoing RAM claims. Hacknet pays for itself in hashes, and hashes buy the
+        // money and the RAM that the rest of the framework then spends.
+        priority: exceptIn(HACKTOCRACY_BITNODE, 25, 100),
         intervalMs: SECOND,
         // Same as cloud: hacknet nodes earn from servers, and BitNode 8 grants
         // none, so the feature is switched off rather than left burning RAM.
@@ -210,8 +228,27 @@ export const FEATURES: readonly FeatureMeta[] = [
 ];
 
 /** Feature scripts in tick order, for the standalone entries that start the orchestrator. */
-export function featurePaths(): string[] {
-    return [...FEATURES].sort((a, b) => a.priority - b.priority).map(feature => feature.path);
+/**
+ * The features in the order they should run, for one BitNode.
+ *
+ * THE SORT MOVED HERE, and it has to. `priority` is a function of the node, so every
+ * caller that sorted by `a.priority - b.priority` would now be comparing two functions —
+ * which is `NaN`, and `NaN` makes the comparator inconsistent in a way that leaves the
+ * array in an arbitrary order rather than failing loudly. There were five such callers
+ * across the orchestrator, the runtime and the doctor; one function means one answer.
+ *
+ * Ties fall back to `id`, so features that share a priority (Home at 20 and Sleeves at
+ * 20 in the default order) do not depend on the order they happen to be written in.
+ */
+export function featuresInOrder(bitNode: number): FeatureMeta[] {
+    return [...FEATURES].sort(
+        (a, b) => a.priority(bitNode) - b.priority(bitNode) || a.id.localeCompare(b.id),
+    );
+}
+
+/** Feature scripts in tick order, for the standalone entries that start the orchestrator. */
+export function featurePaths(bitNode: number): string[] {
+    return featuresInOrder(bitNode).map(feature => feature.path);
 }
 
 /**

@@ -45,8 +45,21 @@ export interface FeatureMeta {
     /**
      * Lower runs first. Priority decides two things: the order features are
      * ticked, and who gets home RAM first when there is not enough for all.
+     *
+     * A FUNCTION OF THE BITNODE, not a constant, because the right order genuinely differs
+     * between nodes. In BitNode 9 (`Hacktocracy`) cloud servers are disabled
+     * (`CloudServerLimit: 0`), script hacking earns a tenth (`ScriptHackMoney: 0.1`) and
+     * hacking experience a twentieth (`HackExpGain: 0.05`), while Hacknet is the node's
+     * whole point and SF9 makes it cheaper and more productive. Running the default order
+     * there spends home RAM — which costs 5× in that node (`HomeComputerRamCost: 5`) — on
+     * features that cannot pay it back, and leaves Hacknet last in line for the RAM it
+     * needs.
+     *
+     * Taking the node number rather than a `Capabilities` also keeps this file RAM-free
+     * and import-free: it is statically imported by the registry, and a capability object
+     * would drag a game call in with it.
      */
-    readonly priority: number;
+    readonly priority: (bitNode: number) => number;
     /**
      * How often the orchestrator offers this feature a tick. This is the
      * maximum rate: a feature may tick less often when it knows nothing can
@@ -69,6 +82,41 @@ export interface FeatureMeta {
      * tiers; sharing follows a RAM fraction), not an omission to be filled in later.
      */
     readonly movable: readonly SubGoalKey[];
+}
+
+/**
+ * A priority that does not depend on the node.
+ *
+ * The default, and what every feature uses except the few whose value genuinely differs
+ * between BitNodes. Written once here so the registry reads as `priority: always(30)`
+ * rather than thirty identical closures, and so the constant case stays visibly constant.
+ */
+export function always(priority: number): (bitNode: number) => number {
+    return () => priority;
+}
+
+/**
+ * The BitNode where the framework reorders itself: `Hacktocracy`.
+ *
+ * Named rather than repeated as a literal 9 at each use, because it appears in several
+ * priorities and the reader has to be able to tell that they are the same node. It is NOT
+ * a Source File number — SF9 happens to share the digit, and conflating the two is the
+ * mistake `lib/caps.ts` already warns about for SF8.
+ */
+export const HACKTOCRACY_BITNODE = 9;
+
+/**
+ * A priority that is higher in one BitNode than elsewhere.
+ *
+ * `when` runs at the given node, `otherwise` everywhere else. Both are numbers rather than
+ * offsets, so a reader sees the actual order each node gets without doing arithmetic.
+ */
+export function exceptIn(
+    bitNode: number,
+    when: number,
+    otherwise: number,
+): (activeBitNode: number) => number {
+    return active => (active === bitNode ? when : otherwise);
 }
 
 /** What a loaded feature module must provide. */

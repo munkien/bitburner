@@ -3,7 +3,7 @@ import type { NS } from "@ns";
 import { detectCapabilities, type Capabilities } from "./caps.ts";
 import type { Context } from "./context.ts";
 import { isFeatureModule, unavailableReason, type FeatureMeta, type FeatureModule } from "./features.ts";
-import { FEATURES } from "./registry.ts";
+import { featuresInOrder } from "./registry.ts";
 import { announce, type MessageLevel } from "./log.ts";
 import {
     createBudget,
@@ -106,7 +106,17 @@ export interface FeatureRuntime {
 }
 
 export function createFeatureRuntime(ns: NS): FeatureRuntime {
-    const states: FeatureStatus[] = FEATURES.map((meta): FeatureStatus => ({
+    // SORTED ONCE, HERE, and the order of this array is the whole priority mechanism:
+    // `load` walks it to decide who gets home RAM first, and `tickAll` walks it to decide
+    // what runs first. Sorting in the registry rather than at each site keeps the two from
+    // disagreeing — and they would, because `priority` depends on the BitNode, which only
+    // this function has read at this point.
+    //
+    // The node is read before the states are built so the order is right from the first
+    // pass. `detectCapabilities` costs one `getResetInfo`, which this already pays for on
+    // the same call path.
+    const bitNode = detectCapabilities(ns).bitNode;
+    const states: FeatureStatus[] = featuresInOrder(bitNode).map((meta): FeatureStatus => ({
         meta,
         state: "unavailable",
         module: null,

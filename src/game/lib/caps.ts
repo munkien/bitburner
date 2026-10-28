@@ -49,6 +49,49 @@ export const SF = {
 export const FORMULAS_EXE = "Formulas.exe";
 
 /**
+ * How a run gains augmentations, which is a property of the BitNode and is EITHER one
+ * way or the other — never both.
+ *
+ * `graft`  graft them at The Sphere, from factions the player already has reputation
+ *          with. Cannot be bought at all.
+ * `buy`    purchase them from factions, the normal pipeline: reserve, donations,
+ *          reputation farming, purchase.
+ *
+ * WHY THIS IS A TABLE RATHER THAN A CAPABILITY TEST. The two pipelines are not merely
+ * alternatives that both happen to be available; they are competing answers to "how does
+ * this run gain augmentations", and running both spends a run's money and its activity
+ * slot on the same goal twice. `augmentPurchase` already knew that BitNode 8 cannot buy,
+ * but nothing said that a node which CAN buy must therefore NOT graft — so a run with SF10
+ * outside BitNode 8 did both, reserving cash for a purchase while also tying up the slot
+ * in hour-long grafts.
+ *
+ * WHERE THE NUMBERS COME FROM. BitNode 8 (Ghost of Wall Street) removes faction purchases
+ * outright, so grafting is the node's only route. Every other node, BitNode 9 included,
+ * augments normally — BN9's multipliers touch Hacknet Servers, stat levels and server
+ * money, and never `AugmentationMoneyCost` or `AugmentationRepCost`.
+ *
+ * Adding a node that grafts is one line here. That is the reason for a table rather than a
+ * condition buried in the capability rules: this is a fact about the game, and it should be
+ * readable as a fact.
+ */
+export type AugmentMode = "graft" | "buy";
+
+const GRAFT_BITNODES: readonly number[] = [
+    8, // Ghost of Wall Street: no faction purchases, so grafting is the only way.
+];
+
+/**
+ * How this BitNode gains augmentations. Defaults to `buy`, which is what every node that
+ * can purchase from a faction uses.
+ *
+ * A single function rather than a constant so the default and the table cannot drift:
+ * every caller asks this, and `augmentPurchase`/`grafting` are both derived from it below.
+ */
+export function augmentMode(bitNode: number): AugmentMode {
+    return GRAFT_BITNODES.includes(bitNode) ? "graft" : "buy";
+}
+
+/**
  * `DarkscapeNavigator.exe` unlocks the Dark Net API.
  *
  * Not a Source File: the Dark Net is reachable on any node once the program is
@@ -120,6 +163,17 @@ interface CapabilityRule {
      * out, and no Source File brings it back.
      */
     readonly excludedBitNodes?: readonly number[];
+    /**
+     * When set, this capability is unavailable in any BitNode whose augment mode is
+     * `buy` — see `augmentMode`.
+     *
+     * A separate field rather than another `excludedBitNodes` list, because the condition
+     * is the MODE rather than a set of node numbers. Writing the node list twice would
+     * reintroduce exactly the drift this change removes: `augmentPurchase` and `grafting`
+     * must be decided by one table, and expressing grafting's exclusion as "whatever the
+     * table calls a buying node" is what makes them unable to both be on.
+     */
+    readonly excludedWhenBuying?: boolean;
     /**
      * Runtime state that Source File levels cannot express.
      *
@@ -197,6 +251,19 @@ const RULES: Readonly<Record<CapabilityKey, CapabilityRule>> = {
         label: "Sleeve API",
         ...sfOrNode(SF.SLEEVES),
     },
+    /**
+     * The Grafting API, and simultaneously the decision that this run grafts AT ALL.
+     *
+     * GRAFTING IS THE GRAFT-MODE ANSWER, and once a node is in buy mode it must not run
+     * even where the API is available. SF10 unlocks the API on any node, so before this
+     * an SF10 player outside BitNode 8 both reserved cash for faction purchases AND tied
+     * the activity slot up in hour-long grafts — two pipelines spending the same run's
+     * resources on one goal. The mode table (`augmentMode`) says which answer this node
+     * uses; this rule is that answer, expressed as the capability the feature gates on.
+     *
+     * The API requirement is unchanged and still has to hold: SF10, or BitNode 10, or
+     * BitNode 8 (which needs grafting as its only route and grants the API for it).
+     */
     grafting: {
         label: "Grafting API",
         // SF10 or BitNode 10 unlocks grafting as the import/export mechanic, and
@@ -204,6 +271,10 @@ const RULES: Readonly<Record<CapabilityKey, CapabilityRule>> = {
         // so grafting is the only way to gain augmentations there.
         sourceFiles: [SF.SLEEVES],
         bitNodes: [SF.SLEEVES, 8],
+        // The BUY nodes have their own answer, so grafting stands down there whatever
+        // the API allows. Written as an exclusion derived from the same table rather
+        // than a second list, so the two capabilities cannot both be satisfied.
+        excludedWhenBuying: true,
     },
     formulas: {
         label: "Formulas API",
@@ -254,10 +325,16 @@ const RULES: Readonly<Record<CapabilityKey, CapabilityRule>> = {
      * `AugmentationMoneyCost` or `AugmentationRepCost`, and nothing in the node
      * prevents a faction purchase. Excluding it switched off the entire pipeline —
      * reserve, donations, rep-farming, buying — for a node that augments normally.
+     *
+     * DERIVED FROM `augmentMode`, and that is the point. This used to be its own
+     * `excludedBitNodes` list, which could only ever say "this node cannot buy". It could
+     * not say the converse — that a node which buys must not graft — so the two pipelines
+     * ran together wherever grafting was also unlocked. Deferring to the one table is what
+     * makes the choice exclusive rather than merely available.
      */
     augmentPurchase: {
         label: "Augment purchasing",
-        excludedBitNodes: [8],
+        excludedBitNodes: GRAFT_BITNODES,
     },
     tor: {
         label: "TOR router",
@@ -352,6 +429,14 @@ function judge(rule: CapabilityRule, staticCaps: StaticCapabilities, probes: Cap
     // cannot be satisfied by accident.
     if (rule.excludedBitNodes?.includes(staticCaps.bitNode)) {
         return unavailable(`disabled in BitNode ${staticCaps.bitNode}`);
+    }
+
+    // The other answer to the same question. A node in `buy` mode purchases its
+    // augmentations, so a capability that IS that node's alternative stands down — the two
+    // must never both be available. Checked here, beside the exclusion above, so both
+    // halves of "this node does it the other way" are decided in one place.
+    if (rule.excludedWhenBuying === true && augmentMode(staticCaps.bitNode) === "buy") {
+        return unavailable(`BitNode ${staticCaps.bitNode} buys augmentations instead`);
     }
 
     // The probe is the whole requirement: no Source File or BitNode can unlock it.
