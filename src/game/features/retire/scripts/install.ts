@@ -35,6 +35,19 @@ const ORCHESTRATOR = "nexus.ts";
 export async function main(ns: NS): Promise<void> {
     ns.ui.openTail();
 
+    // NO HOLD ANY MORE, and its removal is a fix rather than a simplification.
+    //
+    // This script used to begin with `await ns.sleep(HOLD_MS)` so that its caller, which
+    // had spawned it with `ns.run`, could sleep out a matching grace period and then ask
+    // whether the process had survived. That check existed only because `run` cannot
+    // report its own failure.
+    //
+    // The handoff is now started with `ns.spawn(..., { spawnDelay: 0 })` from `retire.ts`,
+    // which replaces the orchestrator synchronously and hands over its RAM. There is no
+    // caller left waiting on a verdict, so there is nothing to hold for — and the hold is
+    // actively harmful now, because it delays the install by a quarter of a second for no
+    // reader's benefit.
+
     const orchestrator = findScriptOnHome(ns, ORCHESTRATOR);
     if (orchestrator === null) {
         // Refuse BEFORE tearing anything down: without a callback the reset would leave
@@ -53,12 +66,17 @@ export async function main(ns: NS): Promise<void> {
 
     announce(ns, "INSTALL", "Stopping all scripts...");
     // Everything except home first, so a worker on a remote host cannot interfere with
-    // the install. Home last, and `killall` spares this script, which is the reason it
-    // can do the rest.
+    // the install. Home last.
+    //
+    // `safetyGuard: true` IS LOAD-BEARING, and its absence was a real defect. The
+    // documented default does NOT skip the calling script, so the old call killed THIS
+    // script — after which nothing could reach `installAugmentations`. That is why no
+    // recording in `runs/` has ever logged "Installing augmentations": the one spawn that
+    // reported success died here, silently, having already stopped the orchestrator.
     for (const host of scanNetwork(ns)) {
         if (host !== "home") ns.killall(host);
     }
-    ns.killall("home");
+    ns.killall("home", true);
 
     announce(ns, "INSTALL", `Installing augmentations. ${ORCHESTRATOR} will start after the reset.`);
     // The game runs `orchestrator` after the reset, with 1 thread and no arguments.
@@ -70,11 +88,25 @@ export async function main(ns: NS): Promise<void> {
     await ns.sleep(10_000);
 }
 
-/** Purchased but not yet installed. */
+/**
+ * Purchased but not yet installed.
+ *
+ * CLAMPED AT ZERO, because the difference of two lengths is not a count. The game is
+ * free to report the shorter list as the longer one — during the tick an install is
+ * being processed, for instance — and the raw subtraction then returns a negative
+ * number, which is truthy and reads as "there is something to install".
+ *
+ * The refusal below is the one thing standing between a stalled handoff and a reset
+ * that discards the run's uninstalled augmentations, so a figure that can be negative
+ * is the wrong input for it.
+ */
 function queuedAugments(ns: NS): number {
     try {
-        return ns.singularity.getOwnedAugmentations(true).length
-            - ns.singularity.getOwnedAugmentations(false).length;
+        return Math.max(
+            0,
+            ns.singularity.getOwnedAugmentations(true).length
+            - ns.singularity.getOwnedAugmentations(false).length,
+        );
     } catch {
         return 0;
     }
