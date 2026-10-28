@@ -288,12 +288,17 @@ const block = (key: string): void => { blocked.set(key, Date.now() + CONFIG.BLOC
 /**
  * Forget everything this feature remembers between ticks.
  *
- * Exported for tests, and it exists because that memory is MODULE state: it lives for
- * the life of the process, so two tests in one run share it. `blocked` is the sharp
- * one — a refusal in one test silences the same target in the next, and a test that
- * expected a contract to be taken would see a crime instead, with no clue why. The
- * same bleed affects `workTargets` and `trainingLocks`, which is why
- * `sleeve-tasks.test.ts` had to invent a unique faction name per test.
+ * NOT CURRENTLY CALLED BY ANYTHING, and that is worth stating rather than leaving to be
+ * discovered. It exists because the memory below is MODULE state that lives for the life of
+ * the process, so two tests in one run would share it: `blocked` is the sharp one, where a
+ * refusal in one test silences the same target in the next and a test expecting a contract
+ * sees a crime instead, with no clue why.
+ *
+ * The comment here used to cite `sleeve-tasks.test.ts` as the reason each test had to invent a
+ * unique faction name. That file has never existed in this repository — the note described a
+ * constraint from a test that was never written, which reads as coverage this feature does not
+ * have. The first test written for the sleeves should call this; until then it is the
+ * affordance waiting for one, and the honest state of the feature is "untested".
  *
  * Not called in production: a restart clears the module anyway, and within a run this
  * memory is intentional.

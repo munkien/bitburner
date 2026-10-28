@@ -21,3 +21,8 @@ NetscriptDefinitions.d.ts
 # what `scripts/run-summary.mjs` reads and what the goal-ranking behaviour was
 # measured against. Valuable, but it belongs in a data store.
 runs/
+
+# Architecture review reports, written to `.review/` by the review skill — the OS
+# temp dir is outside the sandbox, so they land here instead. Generated documents
+# about the code, not the code; a fresh run replaces them.
+.review/

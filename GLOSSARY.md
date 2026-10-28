@@ -71,6 +71,11 @@ An **ambition** is a goal the run sets for itself — owning the stock access
 chain, growing a gang — as opposed to one the game imposes. It lives in the same
 list, because it is the same kind of thing.
 
+**Ranked Goals** is the whole list, ordered. The first is the **working goal**;
+the rest are ranked behind it. They are not a queue: the order is recomputed every
+pass, so a goal can move without anything being added or completed.
+_Avoid_: goal queue, queued goals, backlog
+
 A **declared target** is a figure the run chooses (`GOAL_TARGETS`), in contrast
 to one read from a game requirement. Only for measurements the game has no
 opinion on, such as how rich to get.
@@ -99,8 +104,48 @@ changes it. Cross-feature coordination (a cash reserve) is published through
 
 ### Run
 
-One playthrough, from a reset to the next augmentation install or BitNode reset.
-A run has one goal at a time; the rest are ranked behind it.
+One playthrough, from a reset to the next **Install** or BitNode reset.
+A run has one working goal at a time; the rest are ranked behind it.
+
+### Augmentation
+
+A permanent upgrade bought with reputation and cash, installed by resetting the
+run. Augmentations survive the reset; almost nothing else does.
+
+### Augmentation Queue
+
+The augmentations bought but not yet installed. `queued` always means this, and
+nothing else.
+_Avoid_: pending augments, stash, backlog
+
+Augmentations are the only thing in this framework that queues. Ranked goals are
+not a queue: the ranking is recomputed every pass, so the word would claim a
+stability they do not have. See **Ranked Goals**.
+
+### Retirement
+
+The decision to end the current run in order to install. It is a decision, not an
+event — the judgement that the queue has earned a reset.
+_Avoid_: retire (as a verb for what a Feature does when it stops work)
+
+### Install
+
+The act that ends a run: everything in the **Augmentation Queue** becomes
+permanent and the game resets. A retirement asks for an install; the install is
+what happens.
+_Avoid_: reset (ambiguous with BitNode reset), restart, retire
+
+### Install Timer
+
+The countdown to the install a retirement will ask for, armed by the last
+augmentation purchase. It exists so a reader can tell "waiting" apart from a
+decision that never armed at all.
+_Avoid_: stall, stall clock, retirement timer
+
+The timer is published only while the **Augmentation Queue** could actually
+install — while the retirement rule would honour the wait. A countdown running
+against a queue that can never install is a promise the rule will not keep, and
+on screen it is indistinguishable from a broken timer.
 
 ### BitNode
 
@@ -181,6 +226,14 @@ stays self-contained).
 | `Autonomy` | `full` or `paused` — whether features may act |
 | `Portfolio` | cash + stock book; net worth is derived from it |
 | `LogLine` | one framework message: `tag`, `message`, `level`, `at`, and the server's `seq` |
+| `NexusState.queued` | **Ranked Goals** behind the working goal. NOT augmentations — see below |
+| `NexusState.stall` | the **Install Timer**, absent when it is not counting |
+
+`queued` appears twice on the wire meaning two different things, and it has
+already been misread once: `NexusState.queued` counts **Ranked Goals** behind the
+working one, while `NexusState.stall.queued` counts the **Augmentation Queue**.
+Only the second is a queue. The field names are being brought into line; until
+they are, the parent is the only thing that tells them apart.
 
 `Observation.player` is a **projection**, not `ns.getPlayer()`. The raw object
 carries `mults` (a ~30-entry multiplier table nothing here reads) and `jobs`, and
