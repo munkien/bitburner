@@ -705,6 +705,11 @@ export function tick(ns: NS, context: Context): void {
     // The yield is correct — a finished rest should hand the slot back — it just has to
     // actually release it. `stopBladeburnerAction` is the game's own "end the current
     // action" call, which leaves the division Idle so progression can take the slot.
+    //
+    // So a rest that reached `REST_UNTIL` is the one case where `idle` is not required: the
+    // action is still running, and it is the thing being handed back. Every other tick asks
+    // "am I idle", because a division with an action in flight has a claim and dropping it
+    // merely alternates with training over the same slot.
     // WITH THE BLADE'S SIMULACRUM THERE IS NO SLOT TO YIELD. The augment stops
     // Bladeburner actions occupying the activity slot at all, so training and the
     // division run at the same time and handing the slot back would be giving away
@@ -716,8 +721,19 @@ export function tick(ns: NS, context: Context): void {
     // owns the slot. It is the same condition as `holdsSlot` above, expressed once
     // — see `bladeburnerYieldsForTraining`, which documents the deadlock that
     // asking two different questions produced.
+    //
+    // YIELDS TO TRAINING ONLY ON A CLAIM, and `idle` is the other half of that. Yielding on a
+    // tick where this feature is already holding an action would throw the action away and
+    // still leave the slot with nobody: progression assigns nothing while the work is in
+    // flight, so its retry is a tick later, and the two alternate. Whoever holds it keeps it,
+    // and on a shared slot with training wanted and nothing in flight, that is training.
+    //
+    // `finishedResting` is exempt for the reason the comment above gives: there the action
+    // being dropped IS the one being handed back, so "idle" is the state the yield produces
+    // rather than a precondition of it.
     if (
         !needsRest &&
+        (idle || finishedResting) &&
         bladeburnerYieldsForTraining(
             ns,
             sharesSlot,

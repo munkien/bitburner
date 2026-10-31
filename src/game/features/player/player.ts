@@ -408,7 +408,10 @@ export function tick(ns: NS, context: Context): void {
     // progress rather than pausing it.
     const slotsShared = !context.capabilities.has("bladesSimulacrum");
     if (yieldsForBlackOpOrGraft(ns, slotsShared)) {
-        reason = "yielded: a black op or graft owns the slot";
+        // Named from a READING of what actually holds the slot, not from which test fired:
+        // the gate above is a policy answer ("do not take it"), while the line is a report
+        // of who has it.
+        reason = describeYield(activeSlotHolder(ns));
         return;
     }
     // Yields to Bladeburner only while Bladeburner is KEEPING the slot — a chain
@@ -468,16 +471,16 @@ export function tick(ns: NS, context: Context): void {
                 }
             })();
             reason = stopped
-                ? `yielded: Bladeburner keeps the slot (training capped, released the class)`
-                : `yielded: Bladeburner keeps the slot (training capped, but the class could not be released)`;
+                ? `yielded: a chain holds the slot (training capped, released the class)`
+                : `yielded: a chain holds the slot (training capped, but the class could not be released)`;
             return;
         }
 
-        reason = `yielded: Bladeburner keeps the slot${
-            trainingWantedHeld(trainingRemaining(player, context.goal))
-                ? " (chain running)"
-                : " (training not wanted)"
-        }`;
+        // REPORTED FROM THE SLOT, not from the predicate that was just asked. The old line
+        // derived its reason from `trainingWantedHeld` alone, so "Bladeburner keeps the slot
+        // (training not wanted)" was printed whether or not a chain existed — and the case
+        // where nothing held the slot at all is the 26-minute stall this replaced.
+        reason = describeYield(activeSlotHolder(ns));
         return;
     }
 
@@ -533,13 +536,34 @@ export function tick(ns: NS, context: Context): void {
     // The city is read live, not from the snapshot: the snapshot is one pass old,
     // so after arriving it would still report the previous city and send the
     // player straight back out.
-    const action = withTravel(chosen, currentCityOf(ns));
+    const cityBefore = currentCityOf(ns);
+    const action = withTravel(chosen, cityBefore);
     // The chosen action is the reason, when it was reached at all — so a working
     // tick is as legible as a stalled one.
-    reason = action.kind === "TRAVEL"
-        ? `travelling to ${action.city} (chose ${chosen.kind})`
-        : `acting: ${describeAction(action)}`;
-    assignAction(ns, context, action);
+    //
+    // SET AFTER THE ATTEMPT, NOT BEFORE. It used to be assigned here and then `assignAction`
+    // was called, so a refused action left the status line reading "acting: course Computer
+    // Science" while the activity slot was empty — the stall described itself as work. Now
+    // the line reports what actually happened, and a failure names itself and its city.
+    const started = assignAction(ns, context, action);
+    // A GYM OR UNI ACTION WHOSE CITY WE HAD TO FIX IS REPORTED AS A TRIP, because that is
+    // what happened. `assignAction` may have travelled instead of starting the class, and
+    // saying "acting: course Computer Science" for a tick spent in transit is the small
+    // version of the lie this change is about.
+    const travelledTo = action.kind === "TRAVEL"
+        ? action.city
+        : (action.kind === "GYM" || action.kind === "UNI") && action.city !== undefined && action.city !== cityBefore
+            ? action.city
+            : null;
+    reason = started
+        ? (travelledTo !== null
+            ? `travelling to ${travelledTo} (chose ${chosen.kind})`
+            : `acting: ${describeAction(action)}`)
+        : `could not start ${describeAction(action)}${
+            action.kind === "GYM" || action.kind === "UNI"
+                ? ` (in ${currentCityOf(ns)}, wanted ${action.city ?? "Sector-12"})`
+                : ""
+        }`;
 }
 
 /** A short label for an action, for the status line. */
@@ -892,7 +916,25 @@ function assignAction(ns: NS, context: Context, action: PlayerAction): boolean {
     // the slot still holds the old class until the trip completes, so "already studying"
     // would be true and the trip would never be issued.
     if (action.kind === "TRAVEL") {
-        if (context.snapshot.player.city === action.city) return true;
+        // LIVE CITY, NOT THE SNAPSHOT. This compared `context.snapshot.player.city`, and
+        // that one word is a deadlock when the snapshot is a pass behind:
+        //
+        //   `withTravel` decides to travel against `currentCityOf(ns)` — live — and skips
+        //   the trip when the player is already there, handing back the GYM/UNI action.
+        //   The gate below then re-tests the city, against the SNAPSHOT. If that is stale
+        //   and still names the old city, the test fails, `travelToCity` is issued... for a
+        //   city the player is already in, or worse, the trip is skipped as "already
+        //   there" while the class gate further down ALSO fails on the same stale city.
+        //
+        // The result is an action that neither travels nor starts: no work, no error, no log
+        // line, every tick, until something else moves the player. `reason` had already been
+        // set to "acting: ..." before `assignAction` ran, so the status line reported work
+        // that was never started and the stall was invisible.
+        //
+        // The two halves must read the same clock. `withTravel` chose this action from the
+        // live city, so the question "is a trip still needed" is asked of the live city too.
+        const live = currentCityOf(ns);
+        if (live === action.city) return true;
         const ok = ns.singularity.travelToCity(action.city);
         if (ok) {
             announceAction(context, action);
@@ -900,38 +942,50 @@ function assignAction(ns: NS, context: Context, action: PlayerAction): boolean {
         return ok;
     }
 
-    // PROMOTION HAPPENS ON THE PATH WHERE THE PLAYER IS ALREADY DOING THE ACTION.
+    // ALREADY WORKING THERE: nothing to change, and promotion is no longer this path's job.
     //
-    // This used to sit BEFORE the `isDoingAction` check below, which is the placement that
-    // made promotion impossible: an employed player working at the company hits that
-    // return every tick, so the call above it was reached only on the FIRST tick — the one
-    // that hires — and never again. The run held its entry-level position for the rest of
-    // its life.
+    // BEING CHOSEN TO WORK IS NO LONGER THE TRIGGER. Promotion used to be attempted only
+    // here, which tied it to the priority chain choosing this company — so any stretch of
+    // training, Bladeburner or grafting froze it. `promoteEveryHeldJob` in `passiveTasks`
+    // now sweeps every held job on every pass, whatever holds the slot, so this branch only
+    // has to notice that the player is already where the chain wanted them.
     //
-    // So the two calls are split by state rather than by order: hiring is for a player who
-    // is not working there yet, promotion for one who already is.
-    if (action.kind === "COMPANY" && isDoingAction(current, action)) {
-        maybePromote(ns, action.company, Date.now());
-        return true;
-    }
+    // The earlier bug this comment recorded — the call sitting BEFORE this return, so an
+    // employed player hit the return every tick and was only ever promoted on the first —
+    // is moot now, but the ordering is kept for the reason it was fixed: this is a
+    // "nothing to do" return, and anything above it runs for a player the chain has already
+    // satisfied.
+    if (action.kind === "COMPANY" && isDoingAction(current, action)) return true;
 
     if (action.kind === "COMPANY") ensureCompanyJob(ns, action.company, Date.now());
 
     let success = false;
     switch (action.kind) {
         case "GYM":
-            // Only if already there. Travelling to reach a venue is a decision,
-            // and it is made in `prioritizeAction` — see `isInCity`. Doing it
-            // here as a side effect is what let two branches fight over the
-            // player's location and cancel each other every tick.
+            // NOT THERE -> GO THERE. That is the whole rule, and it used to be "not there ->
+            // do nothing", which is a silent deadlock: `withTravel` is supposed to have
+            // already turned this into a TRAVEL action, so reaching here in the wrong city
+            // means the two disagreed — and the old code answered by doing NOTHING at all.
+            // No class, no trip, no log, every tick, until something else moved the player.
             //
-            // And only if the player is not already in THAT class — see `alreadyDoing`.
-            if (isInCity(currentCityOf(ns), action.city ?? "Sector-12")) {
+            // A trip issued HERE cannot flap: `travelToCity` is idempotent for a city the
+            // player is already in, and the next tick re-reads the live city and either acts
+            // or travels again. The tick after arrival finds the player in place and starts
+            // the class.
+            //
+            // And only issue the class if not already in THAT class — see `alreadyDoing`.
+            // `universityCourse`/`gymWorkout` tear down the running action, so re-issuing the
+            // same class every tick is a restart, not a no-op.
+            if (!isInCity(currentCityOf(ns), action.city ?? "Sector-12")) {
+                success = ns.singularity.travelToCity(action.city ?? "Sector-12");
+            } else {
                 success = alreadyDoing(ns, action) || ns.singularity.gymWorkout(action.gym, action.stat, false);
             }
             break;
         case "UNI":
-            if (isInCity(currentCityOf(ns), action.city ?? "Sector-12")) {
+            if (!isInCity(currentCityOf(ns), action.city ?? "Sector-12")) {
+                success = ns.singularity.travelToCity(action.city ?? "Sector-12");
+            } else {
                 success = alreadyDoing(ns, action) || ns.singularity.universityCourse(action.university, action.course, false);
             }
             break;
@@ -952,6 +1006,24 @@ function assignAction(ns: NS, context: Context, action: PlayerAction): boolean {
     if (success) {
         announceAction(context, action);
         ensureFocus(ns);
+    } else {
+        // A FAILED ASSIGNMENT WAS COMPLETELY SILENT, and that is why an idle player has been
+        // undiagnosable. `tick` sets `reason = "acting: ..."` BEFORE calling this, so the
+        // status line reported work that had not started; the branch that declined to issue
+        // it logged nothing at all. The run then looked like it was training while the
+        // activity slot was empty, with no line anywhere naming the cause.
+        //
+        // Named here, with the city it was refused for, because the wrong-city fall-through
+        // is the failure this class of bug actually takes. `log.change` only fires on a
+        // CHANGE of text, so a persistent refusal is one line rather than one per tick.
+        const where = action.kind === "GYM" || action.kind === "UNI"
+            ? ` (in ${currentCityOf(ns)}, wanted ${action.city ?? "Sector-12"})`
+            : "";
+        log!.change(
+            "action-failed",
+            "Action could not be started",
+            `${describeAction(action)}${where}`,
+        );
     }
     return success;
 }
@@ -1072,6 +1144,36 @@ function isInCity(currentCity: CityName, city: CityName): boolean {
  */
 function currentCityOf(ns: NS): CityName {
     return ns.getPlayer().city;
+}
+
+/**
+ * Whoever is genuinely using the activity slot right now, or null if it is free.
+ *
+ * A READING, not a prediction. Every other predicate in this file asks what the run SHOULD
+ * do; this asks what is true, so a yield can be reported as delegation only when there is
+ * somebody to delegate to.
+ *
+ * Bladeburner is asked through the API rather than through the shared predicate, because
+ * `bladeburnerKeepsSlot` answers "who may claim it" — and its whole history is a series of
+ * answers that were correct as policy and false as observation.
+ */
+function activeSlotHolder(ns: NS): "work" | "blackop" | "graft" | "bladeburner" | null {
+    if (hasActiveGraft(ns)) return "graft";
+    if (hasActiveBlackOp(ns)) return "blackop";
+    try {
+        if (ns.singularity.getCurrentWork() !== null) return "work";
+    } catch {
+        // Unreadable is not evidence of work; fall through to the division.
+    }
+    try {
+        if (ns.bladeburner.inBladeburner()) {
+            const action = ns.bladeburner.getCurrentAction();
+            if (action !== null && action.name !== "Hyperbolic Regeneration Chamber") return "bladeburner";
+        }
+    } catch {
+        // Not in the division on this node.
+    }
+    return null;
 }
 
 /**
@@ -1702,6 +1804,39 @@ function trackRate(ns: NS, player: Player): void {
     const measured = observe(openSample, stat, player.skills[STAT_KEYS[stat]], Date.now());
     openSample = measured.open;
     if (measured.rate !== null) rates[stat] = measured.rate;
+}
+
+/**
+ * What a yielded tick should say, given which of the two yields it took.
+ *
+ * WHY THIS EXISTS, and it is the second half of a 26-minute stall. The status line read
+ *
+ *   yielded: Bladeburner keeps the slot (training not wanted)
+ *
+ * for the whole of it — while `getCurrentWork()` was null and Bladeburner was idle. The
+ * two halves of that claim were true separately and false together: the division had been
+ * TOLD it could keep the slot, and it was not keeping it. A line that reports delegation
+ * when nothing was delegated is worse than no line, because it is the one artefact a
+ * reader would otherwise trust — every panel looked calm for the duration.
+ *
+ * So the yield is stated as what it is. `held` is whether a Bladeburner action is
+ * genuinely in flight; with none, the slot is free and progression is deferring to nobody,
+ * which is a fault worth naming on the line rather than hiding behind the word "yielded".
+ *
+ * `job` names the feature that was actually deferred to, since the two yields have
+ * different owners and only one of them is Bladeburner.
+ */
+function describeYield(holder: "work" | "blackop" | "graft" | "bladeburner" | null): string {
+    switch (holder) {
+        case "graft": return "yielded: a graft owns the slot";
+        case "blackop": return "yielded: a black op owns the slot";
+        case "bladeburner": return "yielded: Bladeburner has an action in flight";
+        case "work": return "yielded: the player has Singularity work";
+        // THE LINE THIS REPLACES SAID "Bladeburner keeps the slot (training not wanted)"
+        // while nothing was running — for 26 minutes, with every other panel looking calm.
+        // A stall that names itself is the point of `reason`; this one did not.
+        case null: return "STALLED: the slot is free and nothing was assigned to it";
+    }
 }
 
 /**

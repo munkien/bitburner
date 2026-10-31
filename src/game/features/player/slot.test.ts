@@ -87,6 +87,37 @@ test("without the augment, a chain still keeps the slot", () => {
     );
 });
 
+test("an IDLE division does not keep the slot, whatever training says", () => {
+    // THE DEADLOCK THIS PINS, measured live rather than reasoned about.
+    //
+    // `bladeburnerKeepsSlot` used to end with `return !trainingWanted`: with no chain in
+    // flight, the division "keeps" the slot precisely when training is NOT wanted. Both
+    // features then read that as exclusive ownership and both stood down —
+    //
+    //   progression     yielded: Bladeburner keeps the slot (training not wanted)
+    //   bladeburner     returned on its own yield without ever reaching `pickAction`
+    //   getCurrentWork  null
+    //
+    // — for 26 minutes and ~1,500 consecutive telemetry frames, while money climbed from
+    // 9b to 24b and hacking crawled 414 → 417 in two hours. Nobody held the slot.
+    //
+    // "Training is not wanted" is the ABSENCE of a request, not a claim on the slot. Only
+    // an action in flight is a claim, so with no chain the slot is free regardless.
+    const idle = fakeNs(null);
+    assert.equal(
+        bladeburnerKeepsSlot(idle, true, false),
+        false,
+        "an idle division claimed the slot it was not using, and progression stood down for it",
+    );
+    // The same for a REST: resting is forced by stamina, not chosen, so it is not a chain
+    // and is not a claim either.
+    assert.equal(bladeburnerKeepsSlot(fakeNs(RESTING), true, false), false);
+
+    // THE CONTROL, and the half that must not move: with a chain running the division is
+    // going somewhere, so it keeps the slot whatever training says.
+    assert.equal(bladeburnerKeepsSlot(fakeNs(CONTRACT), true, false), true);
+});
+
 /* ─── the black op: Bladeburner's action, and the one that regressed ─── */
 
 test("a black op is recognised as one", () => {

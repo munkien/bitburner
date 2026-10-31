@@ -185,6 +185,30 @@ export function bladeburnerHoldsChain(ns: NS): boolean {
  * with no chain and training wanted, both yielded and neither acted. This returns
  * the one thing progression needs, so the pair cannot contradict each other.
  *
+ * ONLY A CHAIN KEEPS THE SLOT, and the clause that said otherwise was a deadlock.
+ *
+ * It used to end `return !trainingWanted` — with no chain in flight, the division kept the
+ * slot precisely when training was NOT wanted. Both features read that as exclusive
+ * ownership and both stood down:
+ *
+ *   progression     yielded: Bladeburner keeps the slot (training not wanted)
+ *   bladeburner     returned on its own yield, never reaching `pickAction`
+ *   getCurrentWork  null
+ *
+ * Measured: 26 minutes, ~1,500 consecutive telemetry frames, money climbing 9b → 24b while
+ * hacking crawled 414 → 417 in two hours. Nobody held the slot and every panel looked calm.
+ *
+ * The reasoning error is worth naming, because it is a shape that will recur. "Training is
+ * not wanted" is the ABSENCE of a request from the one feature that could fill the slot. It
+ * is not a claim on it, and not evidence that anybody else wants it. Treating a refusal as a
+ * handover leaves the slot with whoever was asked to yield — who has, by construction, just
+ * decided to do nothing.
+ *
+ * So the rule is: THE SLOT IS CLAIMED BY WHOEVER ACTS. With no chain in flight the division
+ * is not acting, so the slot is free and progression takes it. This does not re-open the
+ * original deadlock the function was written for: that one needed a chain to be running
+ * while progression stood down, and the `holdsChain` clause still answers it.
+ *
  * `slotsShared` is false when the run owns The Blade's Simulacrum, in which case
  * there is no contention and the slot is never Bladeburner's alone.
  */
@@ -194,9 +218,12 @@ export function bladeburnerKeepsSlot(
     trainingWanted: boolean,
 ): boolean {
     if (!slotsShared) return false;
-    if (bladeburnerHoldsChain(ns)) return true;
-    // Not a chain: the division stands down for training, so the slot is free.
-    return !trainingWanted;
+    // An action in flight is the only claim. `trainingWanted` is deliberately not consulted:
+    // both features already read it for their own halves, and a third reading here is what
+    // turned a refusal into an ownership statement. Kept in the signature because the two
+    // callers pair it with it, and removing it would tempt a caller to reintroduce the term.
+    void trainingWanted;
+    return bladeburnerHoldsChain(ns);
 }
 
 /**
