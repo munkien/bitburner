@@ -555,15 +555,34 @@ export function tick(ns: NS, context: Context): void {
         : (action.kind === "GYM" || action.kind === "UNI") && action.city !== undefined && action.city !== cityBefore
             ? action.city
             : null;
-    reason = started
-        ? (travelledTo !== null
-            ? `travelling to ${travelledTo} (chose ${chosen.kind})`
-            : `acting: ${describeAction(action)}`)
-        : `could not start ${describeAction(action)}${
+    // "ACTING" MUST MEAN THE SLOT IS OCCUPIED, so it is checked rather than assumed.
+    //
+    // `assignAction` reports whether the game ACCEPTED the action, and for two kinds that is
+    // not the same as it running: `createProgram` returns true on acceptance and the work then
+    // finishes on its own, and a course can be accepted into a slot that something else
+    // immediately takes. The result was a status line reading `acting: program ...` over
+    // `work: null` — measured across twenty consecutive frames in
+    // `runs/2026-10-31T14.45.56.500Z`, and the same class of lie as the yield bug that made a
+    // deadlock report as delegation.
+    //
+    // A BACKDOOR and a TRAVEL are exempt because neither is supposed to occupy the slot: the
+    // backdoor launches a worker and the trip moves the player, so an empty slot beside them
+    // is the correct state rather than a failure to start anything.
+    const occupiesSlot = action.kind !== "BACKDOOR" && action.kind !== "TRAVEL";
+    const verified = started && (!occupiesSlot || activeSlotHolder(ns) !== null);
+    reason = !started
+        ? `could not start ${describeAction(action)}${
             action.kind === "GYM" || action.kind === "UNI"
                 ? ` (in ${currentCityOf(ns)}, wanted ${action.city ?? "Sector-12"})`
                 : ""
-        }`;
+        }`
+        : travelledTo !== null
+            ? `travelling to ${travelledTo} (chose ${chosen.kind})`
+            : verified
+                ? `acting: ${describeAction(action)}`
+                // ACCEPTED BUT NOT RUNNING. Named, because the whole point of `reason` is
+                // that a stall should not have to be inferred from a recording.
+                : `STALLED: the game accepted ${describeAction(action)} but the slot is empty`;
 }
 
 /** A short label for an action, for the status line. */
@@ -999,7 +1018,11 @@ function assignAction(ns: NS, context: Context, action: PlayerAction): boolean {
             success = ns.singularity.commitCrime(action.crime, false) > 0;
             break;
         case "PROGRAM":
-            success = ns.singularity.createProgram(action.program, false);
+            // NOT ALREADY CREATING IT. `createProgram` returns TRUE for "accepted", so
+            // re-issuing it both restarts the work and reports success over a slot it did not
+            // fill — the stale `acting:` line the focus panel showed. Asking first is the
+            // same guard GYM and UNI already had; PROGRAM was simply left out of it.
+            success = alreadyDoing(ns, action) || ns.singularity.createProgram(action.program, false);
             break;
     }
 
@@ -1078,7 +1101,17 @@ function getActionKey(a: PlayerAction): string {
  * every other feature to observe a single string comparison.
  */
 export function alreadyDoing(ns: NS, a: PlayerAction): boolean {
-    if (a.kind !== "UNI" && a.kind !== "GYM") return false;
+    // PROGRAM IS ASKED ABOUT TOO, and leaving it out was a lie on the status line rather than
+    // a wasted call. `createProgram` returns TRUE for "accepted", not "running now", so a
+    // re-issue reports `acting:` through `assignAction` whether or not anything is in the
+    // slot. Measured in `runs/2026-10-31T14.45.56.500Z`: twenty consecutive frames of
+    // `acting: program ServerProfiler.exe` over `work: null`, between the program finishing
+    // and the next starting.
+    //
+    // The other kinds stay excluded deliberately. A FACTION or COMPANY re-issue is the call
+    // that moves rep and money, so it must run every tick; a CRIME likewise. Only the kinds
+    // where re-issuing is a tear-down (GYM, UNI) or a false success (PROGRAM) belong here.
+    if (a.kind !== "UNI" && a.kind !== "GYM" && a.kind !== "PROGRAM") return false;
     let current: Work | null;
     try {
         current = ns.singularity.getCurrentWork() as unknown as Work | null;

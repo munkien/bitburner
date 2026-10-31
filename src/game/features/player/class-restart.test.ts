@@ -74,6 +74,38 @@ function fixture(current: unknown) {
     return { ns, calls };
 }
 
+const PROGRAM = { kind: "PROGRAM", program: "ServerProfiler.exe" } as PlayerAction;
+const RUNNING_PROGRAM = { type: "CREATE_PROGRAM", programName: "ServerProfiler.exe" };
+
+test("a program already being created is recognised as in progress", () => {
+    // THE FOCUS-PANEL LIE, measured live in `runs/2026-10-31T14.45.56.500Z`:
+    //
+    //   14:50:50  work null                        prog "acting: program ServerProfiler.exe"
+    //   14:51:10  work CREATE_PROGRAM:DeepscanV1    prog "acting: program DeepscanV1.exe"
+    //
+    // Twenty consecutive frames reported work that was not running, between a program
+    // finishing and the next one starting. `alreadyDoing` refused to ask for PROGRAM at
+    // all — it returned false for anything that was not UNI or GYM — so the case never
+    // reached `isDoingAction`, which had handled `CREATE_PROGRAM` correctly all along.
+    //
+    // The consequence is not cosmetic: `createProgram` returns TRUE for "accepted", and
+    // `assignAction` reports `acting:` on that return value. A tick that re-issues the
+    // creation is indistinguishable, on the status line, from one that started it.
+    assert.equal(
+        alreadyDoing(fixture(RUNNING_PROGRAM).ns, PROGRAM),
+        true,
+        "a program in progress was not recognised, so every tick re-issued the creation",
+    );
+
+    // The control: a DIFFERENT program is not the same action, or the run would be stuck
+    // on whichever program it happened to start first.
+    const other = { type: "CREATE_PROGRAM", programName: "DeepscanV1.exe" };
+    assert.equal(alreadyDoing(fixture(other).ns, PROGRAM), false);
+
+    // And an empty slot is not "in progress" — this is the state the live recording caught.
+    assert.equal(alreadyDoing(fixture(null).ns, PROGRAM), false);
+});
+
 test("a course already in progress is left alone", () => {
     // THE DEFECT. Without this the API is called every second, and the game finishes and
     // restarts the class each time — which is the flicker, and the reason no studying
