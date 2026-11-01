@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { createDocStore } from '@syncstate/core';
 import type { BitNodeStamp, Command, LogLine } from '../shared/types.ts';
 import { recordCommand, recordLog, recordTelemetry, rollRun, runFile, startRun } from './recorder.ts';
-import { describeBoundary, isNewSession, type SessionAnchor } from './session.ts';
+import { describeAnnouncedStart, describeBoundary, isAnnouncedRun, isNewSession, type RunStart, type SessionAnchor } from './session.ts';
 
 // `@syncstate/core`'s build touches `window` under `NODE_ENV !== 'production'`
 // (`window['store'] = this`). There is no `window` in Node, so creating a store
@@ -63,6 +63,18 @@ let recordingTo = startRun(buildStamp());
  * split that run just for having an opinion at last.
  */
 let sessionAnchor: SessionAnchor = { node: null, startedAt: Date.now() };
+
+/**
+ * When the orchestrator execution currently being recorded began, or null for none.
+ *
+ * The counterpart to `sessionAnchor`, for the other way a run ends. The anchor follows the
+ * BITNODE, which catches installs; this follows the ORCHESTRATOR, which catches restarts —
+ * and a restart leaves the node untouched, so the anchor cannot see one. See `isAnnouncedRun`.
+ *
+ * Kept beside the recorder for the same reason the anchor is: a file's boundaries are a
+ * decision, and the recorder only writes.
+ */
+let runStartedAt: number | null = null;
 
 // ------------------------------------------------------------------ pipe -----
 //
@@ -332,6 +344,54 @@ app.post('/api/sync', (req: Request, res: Response) => {
         console.error("Failed to apply state:", error);
         res.sendStatus(500);
     }
+});
+
+/**
+ * A new orchestrator execution has started, as the GAME reports it.
+ *
+ * THE OTHER HALF OF `rollSessionOnInstall`, and it exists because that rule can only see
+ * what a frame carries. A frame says which BitNode it is in; it cannot say that `nexus.ts`
+ * was restarted, because after a restart everything looks the same. So the node rule misses
+ * every restart that does not install — a file edit with the sync watcher running, a
+ * self-restart, an operator typing `run nexus.ts` again — and each of those is a genuinely
+ * new run sharing a file with the execution it replaced.
+ *
+ * POSTed once from `main`, before the first pass, so the frame that follows is the first
+ * line of the new session rather than the last line of the old one.
+ *
+ * Answers with the file being recorded AFTER the announcement, so the game can say where it
+ * is running in its own console. That is a nicety: the game never depends on the answer, and
+ * the endpoint is idempotent so a lost response costs nothing.
+ */
+app.post('/api/run', (req: Request, res: Response) => {
+    const body = req.body as Partial<RunStart> | null | undefined;
+
+    const announced: RunStart | null =
+        typeof body === 'object' && body !== null && typeof body.startedAt === 'number'
+            ? { startedAt: body.startedAt, build: typeof body.build === 'string' ? body.build : undefined }
+            : null;
+
+    // A start the server already has, announced again, is not a new run and must not split
+    // the file. `isAnnouncedRun` owns that decision, including the restart-the-server case
+    // where the game is older than the server recording it.
+    if (!isAnnouncedRun(runStartedAt, announced) || announced === null) {
+        // ADOPT, don't roll: `null` means the server knows of no run yet, so the first
+        // announcement it sees becomes the baseline rather than something to roll on.
+        if (announced !== null && runStartedAt === null) {
+            runStartedAt = announced.startedAt;
+        }
+        res.status(200).json({ rolled: false, recording: recordingTo });
+        return;
+    }
+
+    const reason = describeAnnouncedStart(runStartedAt, announced);
+    runStartedAt = announced.startedAt;
+    recordingTo = rollRun(buildStamp(), reason);
+    console.log(recordingTo === null
+        ? `New run (${reason}) but recording is off`
+        : `New run (${reason}) → ${recordingTo}`);
+
+    res.status(200).json({ rolled: true, recording: recordingTo });
 });
 
 /**

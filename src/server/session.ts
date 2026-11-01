@@ -84,3 +84,83 @@ export function describeBoundary(anchor: SessionAnchor, incoming: BitNodeStamp):
     }
     return `BitNode ${incoming.node} re-entered`;
 }
+
+/*
+ * ----------------------------------------------------------------------------
+ * AN ANNUNCED START
+ * ----------------------------------------------------------------------------
+ * `isNewSession` INFERS a new run from the node changing. That inference is necessary
+ * because the node is the strongest evidence a frame carries, but it is not the whole
+ * truth: the game can restart `nexus.ts` — a file edit, a self-restart after a sync, an
+ * operator typing `run nexus.ts` again — and every one of those starts a new run while the
+ * BitNode stays put. The recording then continues a file that belongs to an execution which
+ * has ended, and the two runs share a timeline.
+ *
+ * So the game ANNOUNCES the start rather than leaving it to be inferred. This is the
+ * opposite trade to the one `isNewSession` makes: that rule has to work from evidence it
+ * cannot control, while this one is told directly.
+ */
+
+/** A start announced by the game, as the game reports it. */
+export interface RunStart {
+    /** When the orchestrator's `main` began, in the game's clock. */
+    readonly startedAt: number;
+    /** The build the starting copy is running, so a stale sync is visible. */
+    readonly build?: string;
+}
+
+/**
+ * Whether an announced start should roll the run file.
+ *
+ * NOT EVERY ANNOUNCEMENT IS A NEW RUN, and the game cannot know: `nexus.ts` can be started
+ * twice by accident, and a restarted orchestrator re-announces the same run. The three
+ * cases, each of which produced a wrong file when handled wrongly:
+ *
+ *   the SAME start, announced twice   do not roll. The idempotency case — a retried POST,
+ *                                     or a second announcement from the same execution.
+ *   a start the server already has    do not roll. A restart of the SERVER against a game
+ *                                     that has been running for hours must not split the
+ *                                     run it is joining, which is the same rule
+ *                                     `isNewSession` makes for a pre-existing install.
+ *   a LATER start than the current    roll. The orchestrator restarted; the execution in
+ *                                     the file is over.
+ *
+ * `lastStartedAt` is the start time of the execution currently being recorded, and `null`
+ * means the server has recorded nothing yet — in which case there is nothing to split, so
+ * the announcement is adopted rather than rolled on.
+ *
+ * A start EARLIER than the one being recorded is refused for the same reason: a delayed
+ * announcement from a previous execution, arriving after its successor has already rolled
+ * the file, must not roll it a second time for a run that has ended.
+ */
+export function isAnnouncedRun(
+    lastStartedAt: number | null,
+    announced: RunStart | null | undefined,
+): boolean {
+    // No announcement, or one without a usable clock: silence, which neither starts a run
+    // nor prevents one. `startedAt` is what makes two announcements comparable at all.
+    if (announced === null || announced === undefined) return false;
+    if (!Number.isFinite(announced.startedAt)) return false;
+
+    if (lastStartedAt === null) return false;
+
+    return announced.startedAt > lastStartedAt;
+}
+
+/** Why an announced run rolled, as a log-ready phrase. */
+export function describeAnnouncedStart(previous: number | null, announced: RunStart): string {
+    if (previous === null) return "starting";
+    const seconds = Math.round((announced.startedAt - previous) / 1000);
+    // The elapsed time is the useful half: a restart seconds apart is a self-restart after
+    // a sync, hours apart is an operator starting a fresh run, and the two read the same
+    // without it.
+    return `orchestrator restarted (previous ran ${formatElapsed(seconds)})`;
+}
+
+/** A duration a reader can act on rather than a raw second count. */
+function formatElapsed(seconds: number): string {
+    if (!Number.isFinite(seconds) || seconds < 0) return "unknown";
+    if (seconds < 60) return `${seconds}s`;
+    if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+    return `${(seconds / 3600).toFixed(1)}h`;
+}

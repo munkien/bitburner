@@ -311,6 +311,40 @@ export async function publishLog(lines: readonly LogLine[]): Promise<boolean> {
 }
 
 /**
+ * Announce that a new orchestrator execution has started.
+ *
+ * THE SERVER CANNOT INFER THIS, and the gap is a recording that lies. It already notices a
+ * BitNode change from the telemetry frames, but a RESTART leaves the node untouched — a file
+ * edit with the sync watcher running, a self-restart after a sync, an operator running
+ * `nexus.ts` again — so a restarted run continues the file belonging to the execution it
+ * replaced, and the two share a timeline.
+ *
+ * Called ONCE from `main`, before the first pass, so the first frame of the new execution
+ * lands in the new file rather than ending the old one.
+ *
+ * Best-effort like every other call here: a server that is not running is the ordinary
+ * state of a game played without the dashboard, and it must not stop the orchestrator.
+ * Returns the recording path when the server names one, purely so the console can say where
+ * this run is being written.
+ */
+export async function announceRun(startedAt: number, build: string): Promise<string | null> {
+    try {
+        const res = await fetch(`${SERVER}/api/run`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ startedAt, build }),
+        });
+        if (!res.ok) return null;
+        const body = await res.json() as { recording?: string | null };
+        return typeof body.recording === "string" ? body.recording : null;
+    } catch {
+        // No server, or it went away between ticks. Not an error worth reporting: the
+        // orchestrator's job is to play the game, and the recording is a side effect.
+        return null;
+    }
+}
+
+/**
  * Publish the raw facts to the server as plain JSON.
  *
  * No SyncState, no patches: the server is the one that turns this into

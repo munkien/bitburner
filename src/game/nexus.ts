@@ -22,6 +22,7 @@ import {
     publishLog,
     pollCommand,
     ackCommand,
+    announceRun,
     type Command,
     type NexusState,
 } from "./strategy.ts";
@@ -171,6 +172,27 @@ export async function main(ns: NS): Promise<void> {
     const trace = new ActivityTrace();
     const runStartedAt = Date.now();
     const runtime = createFeatureRuntime(ns);
+
+    // TELL THE SERVER THIS IS A NEW RUN, before the first frame is published.
+    //
+    // A restart leaves the BitNode untouched, so the server's node-based rule cannot see
+    // one — and every restart would otherwise continue a recording belonging to the
+    // execution it replaced. See `isAnnouncedRun` on the server for what it does with the
+    // announcement.
+    //
+    // NOT AWAITED, deliberately. `main` must not block on the network before its first
+    // pass: a server that is slow, wedged or absent would delay the game itself, and the
+    // orchestrator's job is to play. The announcement is fired here and its answer printed
+    // if it arrives, which is ordering-safe because the server rolls the file before it
+    // returns from this request — the first frame is published a whole pass later, and the
+    // `fetch` is already in flight by then.
+    //
+    // The recording path is printed for the same reason the build stamp is: "which file is
+    // this run being written to" is a question worth answering in the console rather than by
+    // listing the runs directory.
+    void announceRun(runStartedAt, buildStamp(ns)).then(recording => {
+        if (recording !== null) ns.tprint(`INFO: recording to ${recording}`);
+    });
 
     announceRoster(ns);
 
