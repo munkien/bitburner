@@ -8,7 +8,7 @@ import { findScriptOnHome } from "../../lib/scripts.ts";
 import { REACH_SEC, floorEtaSeconds, floorReachable } from "../../lib/training-budget.ts";
 import { TRAIN_CAP_MS, TRAIN_COOLDOWN_MS, capApplies, noteTraining, releaseIfTrainingStopped, trainCapVerdict } from "../../lib/training-cap.ts";
 import { incomeFor, observe, observeIncome, rateFor, type IncomeSample, type MeasuredStat, type OpenIncome, type OpenSample, type RateSample } from "../../lib/rate-tracker.ts";
-import { reserveFor } from "../../lib/purchase-reserve.ts";
+import { heldReserve, reserveFor, type HeldReserve } from "../../lib/purchase-reserve.ts";
 import {
     belowFloor,
     karmaFarmingWanted as karmaFarmingWantedPure,
@@ -241,6 +241,14 @@ let openSample: OpenSample | null = null;
  */
 let incomeSample: IncomeSample | null = null;
 let openIncome: OpenIncome | null = null;
+/**
+ * The augmentation reserve currently in force, so it cannot be quietly lowered.
+ *
+ * `plannedReserve` recomputes the figure every tick from the live balance, which makes it a
+ * function of whatever happens to be in the account rather than a commitment. `heldReserve`
+ * is what turns it into one. See the note there.
+ */
+let heldCashReserve: HeldReserve | null = null;
 
 /**
  * Forget everything this feature remembers between ticks.
@@ -261,6 +269,7 @@ export function reset(): void {
     openSample = null;
     incomeSample = null;
     openIncome = null;
+    heldCashReserve = null;
     // The promotion cadence is per company and outlives a tick. Clearing it on reset means
     // a test (or a reintroduced feature) does not inherit another's timers — the same
     // reason `rates` is cleared here rather than left to rot.
@@ -1880,7 +1889,19 @@ function plannedReserve(ns: NS, player: Player, canBuyAugs: boolean): number {
     // `accumulate` FOR THE MUST-BUYS. A cheap mechanic augmentation would otherwise never be
     // protected on a run whose income puts it outside the horizon — and cheapness is exactly
     // what `MUST_BUY_AUGMENTS` exists to say is not a measure of its worth.
-    return reserveFor(need, player.money, measuredIncome(), undefined, MUST_BUY_AUGMENTS.includes(target.name));
+    const wanted = reserveFor(need, player.money, measuredIncome(), undefined, MUST_BUY_AUGMENTS.includes(target.name));
+
+    // HELD, SO A DIP CANNOT UNDO IT. `reserveFor` is a fraction of the CURRENT balance, so
+    // without this the reserve shrinks every time anything spends — and collapses entirely
+    // on the tick a purchase lands, because the balance it is a fraction of just fell.
+    // Measured in `runs/2026-11-01T12.22.54.797Z`: thirteen collapses to zero in one run,
+    // each followed by the run rebuilding the reserve from nothing. Reported as "it lowers
+    // its reserve once it is reserved", which is exactly what happened.
+    //
+    // The target's IDENTITY is what makes the guarantee per-purchase: switching to a
+    // different augmentation replaces the hold rather than keeping the old, larger figure.
+    heldCashReserve = heldReserve(wanted, `augment:${target.name}`, heldCashReserve, Date.now());
+    return heldCashReserve?.money ?? 0;
 }
 
 // ─── Companies ───

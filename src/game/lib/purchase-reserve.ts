@@ -155,3 +155,84 @@ export function reserveFor(
     // spent", and that is a fraction of the balance ramped by how close the purchase is.
     return Math.ceil(Math.min(money, money * fraction));
 }
+
+/* ─── STICKINESS ─── */
+
+/**
+ * How long a reserve, once granted for a target, may not be lowered.
+ *
+ * THE COMPLAINT THIS ANSWERS: "it shouldn't lower its reserve once they're reserved". And it
+ * should not — a reserve that is recomputed from the CURRENT balance every tick is not a
+ * commitment, it is a tax on whatever happens to be in the account. `reserveFor` returns a
+ * fraction of the balance, so any dip in the balance — a purchase by another feature, a
+ * stock position, an unlucky minute — silently shrinks what is being held back. Measured in
+ * `runs/2026-11-01T12.22.54.797Z`: thirteen collapses, each on the tick a purchase landed,
+ * each taking the reserve to zero and making the run rebuild it from nothing.
+ *
+ * A WINDOW RATHER THAN FOREVER, because a reserve that can only ever rise is the same defect
+ * pointing the other way: a run whose income collapses, or whose target was bought but not
+ * yet reflected, would keep withholding cash it no longer needs. Past the window the figure
+ * is recomputed from scratch, which is what makes the guarantee a floor rather than a ratchet.
+ *
+ * Five minutes: long enough to outlast every recalibration window in the framework (the rate
+ * window is one minute), short enough that a genuinely finished target releases the money
+ * promptly. It deliberately does NOT try to detect "the target was bought" — the target
+ * changes, and a stale identity check is a second thing to get wrong. Time is enough.
+ */
+export const RESERVE_HOLD_MS = 5 * 60_000;
+
+/** A reserve in force, and when it stops being enforced. */
+export interface HeldReserve {
+    /** The cash figure being withheld. Never lowered while held. */
+    readonly money: number;
+    /** When the hold was granted, so it can expire. */
+    readonly at: number;
+    /**
+     * Which purchase the hold is for, as a stable identity.
+     *
+     * Needed because the guarantee is per-TARGET: lowering is forbidden while the run is
+     * still saving for the same thing, and a different target is a different commitment that
+     * starts from nothing. Without this, a run switching targets would keep the old, larger
+     * hold and never release it — reserving for an augmentation it had already left behind.
+     */
+    readonly target: string;
+}
+
+/**
+ * The reserve to withhold now, given what is already held and when the hold was granted.
+ *
+ * Raises immediately, lowers only when the hold has expired. Takes `now` rather than reading
+ * a clock, for the same reason everything else in this module does: a test can then simulate
+ * ten minutes in three lines.
+ *
+ * A DIFFERENT TARGET RELEASES IMMEDIATELY, for the reason on `target`: the commitment has
+ * changed, so the old figure describes a purchase the run is no longer saving for. It is not
+ * lowered to the new target's figure, it is replaced by it, which can be lower or higher.
+ */
+export function heldReserve(
+    wanted: number,
+    target: string,
+    held: HeldReserve | null,
+    now: number,
+): HeldReserve | null {
+    // Nothing wanted and nothing held: the ordinary case for a run with no purchase in view.
+    if (wanted <= 0 && held === null) return null;
+
+    // Nothing wanted, but something held. Keep holding until the window expires, then
+    // release — the money was withheld for a reason and releasing it on a single pass of
+    // "wanted 0" is how a reserve becomes a function of noise.
+    if (wanted <= 0 && held !== null) {
+        return now - held.at > RESERVE_HOLD_MS ? null : held;
+    }
+
+    // A new target is a new commitment. Replace rather than compare, so a switch cannot
+    // leave the run reserving for whichever target happened to need more money.
+    if (held === null || held.target !== target) {
+        return { money: wanted, at: now, target };
+    }
+
+    // The same target: raise at once, lower only once the hold has expired.
+    if (wanted >= held.money) return { money: wanted, at: now, target };
+
+    return now - held.at > RESERVE_HOLD_MS ? { money: wanted, at: now, target } : held;
+}

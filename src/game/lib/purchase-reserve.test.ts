@@ -21,7 +21,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { RESERVE_CAP, RESERVE_HORIZON_SEC, reserveFor } from "./purchase-reserve.ts";
+import { RESERVE_CAP, RESERVE_HOLD_MS, RESERVE_HORIZON_SEC, heldReserve, reserveFor } from "./purchase-reserve.ts";
 
 /** $1m/s, so prices and seconds are the same number and the arithmetic is visible. */
 const EARNING = 1e6;
@@ -144,4 +144,69 @@ test("a must-buy still reserves nothing when there is no income measured", () =>
     // run's spending on a guess is the failure the old 20% rule was written to avoid.
     assert.equal(reserveFor(25e9, 4e9, null, undefined, true), 0);
     assert.equal(reserveFor(25e9, 4e9, 0, undefined, true), 0);
+});
+
+/* ─── STICKINESS ─── */
+
+test("a reserve is not lowered by a dip in the balance", () => {
+    // THE REPORTED COMPLAINT: "it shouldn't lower its reserve once they're reserved".
+    // `reserveFor` returns a fraction of the CURRENT balance, so a purchase by another
+    // feature — or a stock position, or an unlucky minute — shrinks it. This pins the hold
+    // that stops the shrink.
+    const t0 = 10_000;
+    const first = heldReserve(800e6, "augment:X", null, t0);
+    assert.deepEqual(first && first.money, 800e6);
+
+    // The balance dipped; the recomputed figure is a quarter of what it was.
+    const after = heldReserve(200e6, "augment:X", first, t0 + 1_000);
+    assert.equal(after?.money, 800e6, "a dip in the balance silently lowered a reserve already granted");
+});
+
+test("a reserve rises immediately", () => {
+    // The guarantee is a FLOOR, not a ratchet in both directions: as the run gets closer and
+    // the amount to protect grows, it must be able to grow at once. Otherwise a run would
+    // under-reserve for as long as it had been holding anything at all.
+    const t0 = 10_000;
+    const first = heldReserve(200e6, "augment:X", null, t0);
+    const after = heldReserve(800e6, "augment:X", first, t0 + 1_000);
+
+    assert.equal(after?.money, 800e6, "a rise was delayed by the hold");
+});
+
+test("the hold expires, so a finished target releases the money", () => {
+    // A reserve that can only ever rise is the same defect pointing the other way. Past the
+    // window the figure is recomputed from scratch, which is what makes this a floor rather
+    // than a ratchet.
+    const t0 = 10_000;
+    const first = heldReserve(800e6, "augment:X", null, t0);
+
+    const inside = heldReserve(0, "augment:X", first, t0 + RESERVE_HOLD_MS);
+    assert.equal(inside?.money, 800e6, "the reserve was released before the hold expired");
+
+    const after = heldReserve(0, "augment:X", first, t0 + RESERVE_HOLD_MS + 1);
+    assert.equal(after, null, "the hold never expired, so the money was withheld forever");
+});
+
+test("a different target replaces the hold rather than keeping the larger one", () => {
+    // The guarantee is per-TARGET. Switching targets must not leave the run reserving for
+    // an augmentation it has already left behind — that is withheld money buying nothing.
+    const t0 = 10_000;
+    const first = heldReserve(800e6, "augment:X", null, t0);
+    const switched = heldReserve(100e6, "augment:Y", first, t0 + 1_000);
+
+    assert.equal(switched?.money, 100e6, "the previous target's reserve survived a target change");
+    assert.equal(switched?.target, "augment:Y");
+});
+
+test("nothing held and nothing wanted stays nothing", () => {
+    // The ordinary case on a run with no purchase in view. Guarded because a naive
+    // implementation returns a hold of 0 rather than null, and a zero-valued hold renders as
+    // a reserve row that is in force while withholding nothing.
+    assert.equal(heldReserve(0, "augment:X", null, 10_000), null);
+});
+
+test("a hold that was never granted does not appear from a zero", () => {
+    // `wanted <= 0` with no hold must not manufacture one, or the console would show a
+    // reserve the moment the run had nothing to save for.
+    assert.equal(heldReserve(0, "augment:X", null, 10_000), null);
 });

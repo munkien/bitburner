@@ -222,12 +222,33 @@ export function observeIncome(
     if (elapsedMs < RATE_WINDOW_MS) return { open, rate: null };
 
     const gained = cash - open.value;
+
+    // A FALL IS A PURCHASE, NOT AN EARNING RATE — SO NO RATE IS PRODUCED AT ALL.
+    //
+    // This used to return `Math.max(0, gained / elapsed)`, which clamped a fall to a rate of
+    // ZERO. That is the right answer to "what is the income" and the wrong thing to publish:
+    // zero is a MEASUREMENT, and every consumer reads it as evidence that the run is not
+    // earning. The augmentation reserve is decided from this figure, so it collapsed to
+    // nothing on the tick any purchase landed and stayed there for a whole window —
+    // thirteen times in `runs/2026-11-01T12.22.54.797Z`:
+    //
+    //   13:23:15  income 1577k  money 260.7m
+    //   13:23:20  income    0k  money  79.0m   <- a purchase inside the window
+    //
+    // Returning null instead leaves the caller holding its previous sample, which is the
+    // honest state: nothing new was measured, and what was measured last is still the best
+    // description of how fast this run earns. `incomeFor` ages it out on its own, so a run
+    // that genuinely stops earning loses the figure within `RATE_STALE_MS`.
+    //
+    // The open sample is STILL RESET to the new balance, so the next window measures from
+    // just after the purchase rather than straddling it.
+    if (gained < 0) {
+        return { open: { value: cash, at: now }, rate: null };
+    }
+
     return {
         open: { value: cash, at: now },
-        // Clamped at zero for the reason `observe` gives: money that LEFT the account is a
-        // purchase or a loss, not a negative earning rate. A negative rate divided into a
-        // shortfall would produce a negative ETA and read as "already affordable".
-        rate: { rate: Math.max(0, gained / (elapsedMs / 1000)), at: now },
+        rate: { rate: gained / (elapsedMs / 1000), at: now },
     };
 }
 
