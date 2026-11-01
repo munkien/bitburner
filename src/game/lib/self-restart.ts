@@ -29,8 +29,39 @@ import type { NS } from "@ns";
  * ============================================================================
  */
 
-/** How long to let file sync finish writing before booting the new copy. */
-const RESTART_DELAY_MS = 1_000;
+/**
+ * How long a change must stay unchanged before it is acted on.
+ *
+ * WAS ONE SECOND, and that is too short for the thing it is actually testing. The point of
+ * the debounce is to wait out `bitburner-filesync`, which rewrites a file several times
+ * during one save — and a single edit to a shared module can touch a dozen files as the
+ * syncer works through them. At one second the watcher could fire between two of those
+ * writes, restart into a half-updated tree, and do it again on the next pass: the observed
+ * symptom was the feature roster printing twice in one second.
+ *
+ * Sixty seconds is also the interval the operator asked for, and the two concerns agree —
+ * a minute is comfortably longer than a sync takes and short enough that an edit shows up
+ * while the edit is still in mind.
+ *
+ * NOT TO BE CONFUSED WITH `SPAWN_DELAY_MS`, which was the same constant until this change.
+ * They answer different questions and a minute is right for only one of them.
+ */
+export const RESTART_DELAY_MS = 60_000;
+
+/**
+ * How long the game waits before starting the replacement copy.
+ *
+ * SEPARATE FROM THE DEBOUNCE, and the reason is that they were one constant. `spawnDelay`
+ * is how long the script is DEAD before it reboots, so a minute there would leave the
+ * orchestrator stopped for a minute after every restart — features unloaded, telemetry
+ * dark, the dashboard showing a stale frame. The debounce decides WHEN to restart; this
+ * decides how long the gap is, and a few seconds is the right answer to the second question
+ * regardless of what the first is set to.
+ *
+ * Short because the work it covers is done: by the time the debounce has fired, file sync
+ * has been quiet for `RESTART_DELAY_MS` and there is nothing left to wait for.
+ */
+export const SPAWN_DELAY_MS = 2_000;
 
 /**
  * How many directories the tree walk may visit before it gives up.
@@ -174,7 +205,7 @@ export function createChangeWatcher(ns: NS): ChangeWatcher {
 
             ns.spawn(
                 self.filename,
-                { threads: self.threads, spawnDelay: RESTART_DELAY_MS },
+                { threads: self.threads, spawnDelay: SPAWN_DELAY_MS },
                 ...self.args,
             );
             return true;
