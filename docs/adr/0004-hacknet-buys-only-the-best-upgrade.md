@@ -13,8 +13,14 @@ dollar, at every dollar.
 
 Two consequences that are easy to undo by accident:
 
-- **One purchase per pass.** There is no loop. A second purchase in the same pass can only
-  be the second-best option, competing for money the ranking never allocated to it.
+- **Every purchase in a pass is the ranking's top choice.** The rule is about *substitution*,
+  not about how many times the best thing may be bought. A pass re-ranks after each purchase
+  and may repeat up to `PURCHASES_PER_PASS` times, but only while the best remaining choice
+  still fits the budget. It never falls to the second-best to use up what is left.
+  *(Amended: this ADR previously said "one purchase per pass" outright. That was rate-limiting
+  the fleet rather than protecting it — one upgrade per second meant the tick rate, not the
+  money, limited fleet growth. The anti-substitution rule it was meant to express is unchanged
+  and still tested.)*
 - **The best value is computed without a budget filter**, and affordability is checked
   afterwards by the caller. Asking the ranking *with* the budget just returns the cheaper
   thing, which is the behaviour this decision rules out.

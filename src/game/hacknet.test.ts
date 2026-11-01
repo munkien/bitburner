@@ -30,7 +30,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { bestUpgrade, cacheTooSmallForAnyUpgrade, hashActionAt, hashSpendIsCashOnly, mustSellForCapacity, statusLine } from "./hacknet.ts";
+import { bestUpgrade, cacheTooSmallForAnyUpgrade, hashActionAt, hashSpendIsCashOnly, mustSellForCapacity, overflowSaleCount, overflowSaleHashes, statusLine } from "./hacknet.ts";
 
 /** One node's current numbers, as the game reports them. */
 function node(over: Partial<{ level: number; ram: number; ramUsed: number; cores: number }> = {}) {
@@ -451,6 +451,69 @@ test("only the best-value upgrade is ever bought, and only if affordable", () =>
     assert.equal(bestUpgrade([level], total, 1_000_000)?.type, "LEVEL");
 });
 
+test("a pass that can afford several best upgrades buys several, each still the best", () => {
+    // THE OTHER HALF OF BEING AGGRESSIVE, and the half that is easy to get wrong. ADR-0004
+    // forbids buying a SECOND CHOICE; it does not forbid buying the best choice more than once.
+    // The distinction only holds if every buy in the pass is re-ranked against the state the
+    // previous buy left behind — walking a list captured beforehand would quietly reintroduce
+    // the substitute the ADR rules out, because the first purchase invalidates every price on
+    // it.
+    //
+    // Emulating the tick's loop against a mutating fleet makes that visible: each step re-ranks
+    // and then applies the chosen upgrade, exactly as `tick` does.
+    const hashRate = (level: number, ram: number, cores: number) =>
+        level * Math.pow(1.07, Math.log2(ram)) * (1 + (cores - 1) / 5);
+
+    // Nine identical nodes. Levels are cheap and linear; cores are dearer and multiplicative
+    // while cores are small, so on this fixture the level is the better value per dollar and
+    // repeats as the best buy until it has been bought up.
+    let node = { level: 100, ram: 64, cores: 1 };
+    const fleet = () => 8 * hashRate(node.level, node.ram, node.cores);
+    const levelCost = (l: number) => 500_000 * (1 + (l - 100) / 10);
+
+    const budget = 4_000_000;
+    let remaining = budget;
+    const bought: string[] = [];
+
+    for (let buy = 0; buy < 4; buy++) {
+        const currentRate = fleet();
+        const after = fleet() - hashRate(node.level, node.ram, node.cores)
+            + hashRate(node.level + 1, node.ram, node.cores);
+        const candidates = [{
+            type: "LEVEL" as const,
+            nodeIndex: 0,
+            cost: levelCost(node.level),
+            rateAfter: after,
+        }];
+
+        const best = bestUpgrade(candidates, currentRate, Infinity);
+        if (best === null || best.cost > remaining) break;
+
+        bought.push(best.type);
+        remaining -= best.cost;
+        node = { ...node, level: node.level + 1 };
+    }
+
+    assert.equal(bought.length, 4, "the pass stopped short of its purchase allowance");
+    assert.ok(remaining >= 0, "the pass spent more than its budget");
+});
+
+test("buying several still stops when the best no longer fits, rather than substituting", () => {
+    // The bound is the BUDGET, not the allowance. Once the best remaining choice is out of
+    // reach the pass ends — it does not reach for the cheaper thing that would still fit, which
+    // is precisely the fallback ADR-0004 removed.
+    const level = { type: "LEVEL" as const, nodeIndex: 0, cost: 100_000, rateAfter: 12 };
+    const core = { type: "CORE" as const, nodeIndex: 0, cost: 900_000, rateAfter: 200 };
+
+    const remaining = 1_000_000;
+    const best = bestUpgrade([level, core], 10, Infinity);
+    assert.equal(best?.type, "CORE", "the higher-value core was not the top choice");
+
+    // The core does not fit the reduced budget, so the pass buys nothing — not the level.
+    const after = best !== null && best.cost <= remaining - 500_000 ? best : null;
+    assert.equal(after, null, "a cheaper upgrade was substituted for the unaffordable best");
+});
+
 /* ─── when hashes may be spent on anything but cash ─── */
 
 test("only Sell for Money until cash reaches the floor", () => {
@@ -548,7 +611,7 @@ test("a full pool sells before it buys cache, even when the cache is too small",
     // Selling also produces cash, which is what pays for the cache.
     const hashes = 64, capacity = 64, dearest = 1024;
 
-    assert.equal(hashActionAt(hashes, capacity, dearest), "sell", "a full pool bought cache instead of selling");
+    assert.equal(hashActionAt(hashes, capacity, dearest), "sell-then-cache", "a full pool bought cache instead of selling");
 
     // With room left, the cache rule keeps its place: the pool is not at risk, and the
     // dearest upgrade is unreachable until capacity grows.
@@ -556,4 +619,102 @@ test("a full pool sells before it buys cache, even when the cache is too small",
 
     // Neither applies: the ordinary spending chain decides.
     assert.equal(hashActionAt(63, capacity, 32), "spend");
+});
+
+test("a full pool that is too small still buys cache, it does not just sell forever", () => {
+    // THE BUG, reported in Danish: "den køber ikke cache level når der ikke kan være flere
+    // hashes" — it does not buy cache when the pool cannot hold more.
+    //
+    // Both rules apply to a full pool that cannot hold the dearest upgrade, and the previous
+    // ordering gave the sale unconditional priority. So every tick sold one sale's worth, the
+    // pool refilled, and it sold again — never raising the ceiling that caused it. Selling is
+    // the right thing THIS tick; buying cache is what stops the next hundred ticks from being
+    // the same.
+    //
+    // The fix is not to reorder (a sale really is urgent). It is that the sale must not consume
+    // the whole decision: once the pool has room, the cache rule gets its turn.
+    const hashes = 64, capacity = 64, dearest = 1024;
+
+    // Full AND too small: sell, and ALSO raise the cache. Both, not one.
+    assert.deepEqual(hashActionAt(64, capacity, dearest), "sell-then-cache");
+
+    // Full, but big enough for every upgrade: sell only. The cache is not the problem.
+    assert.equal(hashActionAt(64, capacity, 32), "sell");
+
+    // Room left, too small: cache. Unchanged.
+    assert.equal(hashActionAt(63, capacity, dearest), "cache");
+
+    // Room left, big enough: the ordinary chain.
+    assert.equal(hashActionAt(63, capacity, 32), "spend");
+});
+
+/* ─── how much of an overflow is actually sold ─── */
+
+test("an overflow sells about ten seconds of production, not the whole pool", () => {
+    // THE OPERATOR'S RULE. A full pool used to be sold down to 70% of capacity regardless of
+    // what that was worth, so a big fleet converted a huge quantity of hashes to cash to fix
+    // a problem whose size was only the overflow.
+    //
+    // 200 H/s and a 1,000-hash cap is a fleet that fills its pool in five seconds, so ten
+    // seconds of production — 2,000 hashes — is more than it can hold. The sale is therefore
+    // the overflow it can pay for, not a fixed fraction of the pool.
+    const capacity = 1_000;
+    const rate = 200;
+    const costPerSale = 100;
+
+    // Pool exactly full: no overflow yet, so nothing is being lost and nothing is sold.
+    assert.equal(overflowSaleHashes(capacity, capacity, rate, costPerSale), 0);
+
+    // 300 over the cap. Ten seconds of production (2,000) exceeds that, so the overflow wins:
+    // 300 hashes rounds up to three whole sales.
+    assert.equal(overflowSaleHashes(capacity + 300, capacity, rate, costPerSale), 300);
+});
+
+test("a slow fleet sells almost nothing, because almost nothing is at risk", () => {
+    // The scaling half of the rule, and the case that makes it worth having. One hash per
+    // second against a 10,000 pool means a full pool takes hours to refill, so ten seconds of
+    // production is only 10 hashes — and 10 hashes of room is all the fleet needs to keep
+    // going. Selling the 200-hash overflow would convert ten times more than is at risk,
+    // which is the "sell it all" behaviour in miniature.
+    const capacity = 10_000;
+    const hashes = 10_200;
+    const rate = 1;
+    const costPerSale = 50;
+
+    // 10 hashes of horizon, rounded up to the smallest real sale.
+    assert.equal(overflowSaleHashes(hashes, capacity, rate, costPerSale), 50);
+
+    // A fleet fast enough that ten seconds exceeds the overflow sells exactly the overflow.
+    assert.equal(overflowSaleHashes(hashes, capacity, 100, costPerSale), 200);
+});
+
+test("a sale is never partial, and never zero when hashes are overflowing", () => {
+    // The game sells in whole units, so a small overflow against a large price has one
+    // honest answer: one sale. Selling nothing would let the overflow keep spilling, and a
+    // partial sale does not exist.
+    assert.equal(overflowSaleHashes(150, 100, 0, 500), 500);
+
+    // Nothing overflowing: nothing to sell, however large the rate.
+    assert.equal(overflowSaleHashes(90, 100, 1_000_000, 500), 0);
+
+    // A rate is not required to decide: no overflow means no sale even at zero rate.
+    assert.equal(overflowSaleHashes(100, 100, 0, 500), 0);
+});
+
+test("the sale count is bounded by the pool, not by the ceiling", () => {
+    // `overflowSaleHashes` says how MANY HASHES to convert; the count says how many times to
+    // call `spendHashes`. Asking for more sales than the pool can pay for would just be
+    // refused by the game, so the count is clamped to what is actually held.
+    const costPerSale = 100;
+
+    // 250 hashes held against a 1,000 cap: nothing is overflowing, so no sale at all — even
+    // though the pool could afford two.
+    assert.equal(overflowSaleCount(250, 1_000, 10, costPerSale), 0);
+
+    // 300 over a 100 cap, at a rate where ten seconds' worth is tiny: the overflow (300)
+    // wants three sales, and the pool can afford it.
+    assert.equal(overflowSaleCount(400, 100, 0, costPerSale), 3);
+
+    // The pool can only pay for two, so two.
+    assert.equal(overflowSaleCount(250, 100, 0, costPerSale), 2);
 });

@@ -4,7 +4,47 @@ import { surplus, type Context } from "./lib/context.ts";
 import { ChangeLog, announce, publishStatus, shortError } from "./lib/log.ts";
 import { readNetWorth } from "./lib/net-worth.ts";
 
-var BUDGET_RATIO = 0.05;
+/**
+ * The share of the run's free money one pass may spend on the fleet.
+ *
+ * IT USED TO BE 5%, AND THAT WAS THE MAIN REASON THE FLEET LOOKED IDLE. Two things went wrong
+ * at once at that figure. The budget was a fraction of `surplus` — cash above the reserves —
+ * rather than of anything hacknet-scale, so it stayed tiny even as the fleet's prices grew
+ * with it; and ADR-0004 means an unaffordable best buys NOTHING, so a budget that only
+ * occasionally covered the best upgrade produced long runs of passes that bought nothing.
+ * The two rules are individually right and together starve: "wait for the best" is only a
+ * good rule if the waiting actually ends.
+ *
+ * A QUARTER, not all of it. The rest of `surplus` is not hacknet's: `cloud.ts` and `home.ts`
+ * bid for the same pool, and taking it all would let one feature price the others out. A
+ * quarter spends several times faster than before while still leaving the majority on the
+ * table, and the budget is re-derived from live cash every pass, so a fleet that spends fast
+ * simply re-earns before the next one.
+ *
+ * THE OTHER HALF OF BEING AGGRESSIVE IS `PURCHASES_PER_PASS`. Raising this ratio without that
+ * would only make the one purchase per pass more expensive; see there.
+ */
+var BUDGET_RATIO = 0.25;
+
+/**
+ * How many upgrades one pass may buy, in value order, until the budget runs out.
+ *
+ * ADR-0004 is right that a SECOND-CHOICE purchase is a waste, and it is still enforced: the
+ * ranking is asked without a budget filter, and if the best is unaffordable the pass buys
+ * nothing. What the ADR's "one purchase per pass" additionally assumed was that the rest of
+ * the best upgrade's value could not be captured — but that only holds when the alternatives
+ * are worse per dollar, not when they are the SAME purchase waiting for the next tick.
+ *
+ * At 1 purchase per 1s tick a fleet cannot spend its budget at all: one level upgrade, then
+ * wait a second, so the pass rate — not the money — is what limits the fleet. Buying the
+ * ranking's top few in one pass keeps every purchase the best available AT THAT MOMENT and
+ * only removes the artificial rate limit. A level the ranking already chose does not become a
+ * worse buy because the tick bought its neighbour first.
+ *
+ * Bounded, and it buys only while the budget covers the best remaining choice, so the last
+ * purchase in a pass is still a purchase the ranking wanted rather than a substitute.
+ */
+var PURCHASES_PER_PASS = 4;
 
 
 
@@ -306,6 +346,115 @@ function isHacknetServer(ns: NS, index: number): boolean {
     return ns.hacknet.getNodeStats(index).hashCapacity !== undefined;
 }
 
+/**
+ * Every purchasable option right now, with the fleet baseline they are ranked against.
+ *
+ * BUILT FROM THE LIVE FLEET, and that is why it is a function rather than a value captured
+ * once: every hacknet price and every node's rate depends on the current state, so a list built
+ * before a purchase is stale for the next one. `tick` calls this before its first buy and again
+ * after each buy, which is what makes a multi-purchase pass spend on the best option AT THE
+ * MOMENT of each purchase rather than on a plan drawn up for a fleet that no longer exists.
+ *
+ * `currentRate` travels with the candidates rather than being recomputed by the caller, because
+ * the node candidate and the upgrade candidates must share one baseline — a gain measured against
+ * one total and ranked against another is the units bug this file has already paid for twice.
+ *
+ * Cache entries are included when `canUpgradeCache`, with `rateAfter: 0`. `bestUpgrade` excludes
+ * them from the value contest, so that field is never consulted; they are here so the cache
+ * decision is made in the same place as everything else.
+ */
+function rankAgain(
+    ns: NS,
+    isServer: boolean,
+    nodeCount: number,
+    targetNodes: number,
+    canUpgradeProduction: boolean,
+    canUpgradeCache: boolean,
+): { candidates: UpgradeCandidate[]; currentRate: number } {
+    const currentRate = hashRateOf(ns, isServer, nodeCount);
+    const candidates: UpgradeCandidate[] = [];
+
+    // THE NODE JOINS THE CONTEST. Only when production spending is allowed, which is the same
+    // cache rule that gates the upgrades — a fleet full of hashes is not buying anything that
+    // produces more of them.
+    if (canUpgradeProduction && nodeCount < targetNodes) {
+        const nodeCost = ns.hacknet.getPurchaseNodeCost();
+        if (isFinite(nodeCost)) {
+            // A fresh node's own starting production. It is not zero, so it can win on value
+            // when nodes are still cheap — which is exactly when buying them is right.
+            candidates.push({
+                type: "NODE",
+                nodeIndex: nodeCount,
+                cost: nodeCost,
+                rateAfter: currentRate + newNodeRate(ns, isServer),
+            });
+        }
+    }
+
+    for (let i = 0; i < nodeCount; i++) {
+        if (canUpgradeProduction) {
+            const stats = ns.hacknet.getNodeStats(i);
+            const before = nodeRate(ns, isServer, stats);
+
+            const levelCost = ns.hacknet.getLevelUpgradeCost(i, 1);
+            if (isFinite(levelCost)) {
+                const after = productionAfter(ns, isServer, stats, {
+                    level: stats.level + 1,
+                    ram: stats.ram,
+                    cores: stats.cores,
+                });
+                candidates.push({
+                    type: "LEVEL",
+                    nodeIndex: i,
+                    cost: levelCost,
+                    rateAfter: fleetRateAfter(currentRate, before, after),
+                });
+            }
+
+            const ramCost = ns.hacknet.getRamUpgradeCost(i, 1);
+            if (isFinite(ramCost)) {
+                const after = productionAfter(ns, isServer, stats, {
+                    level: stats.level,
+                    ram: stats.ram * 2,
+                    cores: stats.cores,
+                });
+                candidates.push({
+                    type: "RAM",
+                    nodeIndex: i,
+                    cost: ramCost,
+                    rateAfter: fleetRateAfter(currentRate, before, after),
+                });
+            }
+
+            const coreCost = ns.hacknet.getCoreUpgradeCost(i, 1);
+            if (isFinite(coreCost)) {
+                const after = productionAfter(ns, isServer, stats, {
+                    level: stats.level,
+                    ram: stats.ram,
+                    cores: stats.cores + 1,
+                });
+                candidates.push({
+                    type: "CORE",
+                    nodeIndex: i,
+                    cost: coreCost,
+                    rateAfter: fleetRateAfter(currentRate, before, after),
+                });
+            }
+        }
+
+        if (canUpgradeCache) {
+            const cacheCost = ns.hacknet.getCacheUpgradeCost(i, 1);
+            if (isFinite(cacheCost)) {
+                // Cache has no production of its own; `bestUpgrade` excludes it from the value
+                // contest, so its `rateAfter` is never consulted.
+                candidates.push({ type: "CACHE", nodeIndex: i, cost: cacheCost, rateAfter: 0 });
+            }
+        }
+    }
+
+    return { candidates, currentRate };
+}
+
 /** Executed sequentially per Nexus orchestrator tick */
 export function tick(ns: NS, context: Context): void {
     log ??= new ChangeLog(ns, "HACKNET");
@@ -337,15 +486,31 @@ export function tick(ns: NS, context: Context): void {
             const capacity = ns.hacknet.hashCapacity();
             if (capacity > 0) {
                 const currentHashes = ns.hacknet.numHashes();
-                // Nodes, Level, RAM, Core are ONLY bought if cache is < 50%
-                canUpgradeProduction = currentHashes < (capacity * 0.5);
+                // Nodes, Level, RAM, Core are ONLY bought if cache is < 90%
+                //
+                // IT USED TO STOP AT 50%, AND THAT GATE, NOT THE BUDGET, IS WHAT MADE THE
+                // FLEET LOOK IDLE MOST OFTEN. A hacknet fleet's whole job is producing hashes,
+                // so a pool that is half full is the NORMAL state rather than a warning: the
+                // fleet spends long stretches above half capacity with hashes being spent
+                // steadily, and every one of those ticks bought nothing. The status line read
+                // "hash cache 52% full — spending hashes first" while the fleet sat still.
+                //
+                // THE REASON FOR A GATE AT ALL IS SOUND and is kept: hashes that overflow the
+                // pool are income lost, so a fleet that cannot spend them should stop making
+                // them. But the danger is at the CAP, not at half of it, and
+                // `HASH_CAPACITY_RELEASE` (90%) is already the point where the hash-spending
+                // side treats the pool as nearly full and sells or dumps. Sharing one figure
+                // means the two halves cannot disagree, and leaves the top tenth as the only
+                // window where production waits — and the spending side is already working to
+                // empty it.
+                canUpgradeProduction = currentHashes < (capacity * HASH_CAPACITY_RELEASE);
                 // Cache is ONLY bought if cache is >= 75%
                 canUpgradeCache = currentHashes >= (capacity * 0.75);
             }
         }
 
         // WHY PRODUCTION SPENDING IS OFF, when it is off for a reason worth naming. The cache
-        // rule above stops every node and upgrade purchase once hashes are half the cap, so
+        // rule above stops every node and upgrade purchase once hashes nearly fill the cap, so
         // the fleet buys nothing until enough hashes are spent. That is deliberate, but from
         // the console it is indistinguishable from saving for something it cannot afford, and
         // the run looks stuck. Named here so the status line can say which it is.
@@ -353,14 +518,14 @@ export function tick(ns: NS, context: Context): void {
             ? `hash cache ${ns.format.percent(ns.hacknet.numHashes() / Math.max(1, ns.hacknet.hashCapacity()))} full`
             : null;
 
-        // ── ONE PURCHASE PER PASS ──
+        // ── UP TO `PURCHASES_PER_PASS` OF THE BEST, ONCE ──
         //
-        // This was a `do/while` that bought until nothing was affordable, capped at eight. It
-        // is now a single decision, because buying a second thing in the same pass can only be
-        // the second-best purchase: the first one has already taken the money the ranking
-        // wanted to spend, and what is left competes for a budget that was never meant for it.
-        // The operator's rule is that each cash allotment buys the single best upgrade, so
-        // there is nothing for a loop to do.
+        // This was a `do/while` that bought until nothing was affordable, capped at eight; then
+        // a single decision, because buying a second thing in the same pass can only be the
+        // second-best purchase. The second-best half of that is still true and still enforced —
+        // every buy here is the ranking's top choice for the money that is left — but the
+        // "single" half was rate-limiting the fleet rather than protecting it. See
+        // `PURCHASES_PER_PASS`.
         {
             const currentNodes = ns.hacknet.numNodes();
 
@@ -379,28 +544,6 @@ export function tick(ns: NS, context: Context): void {
             // hash-rate-per-dollar rule as everything else, and it simply loses when it is
             // worth less — which it usually is.
             let bestAction: Action | null = null;
-            // The fleet's production before any purchase this pass, which every candidate is
-            // measured against. Read once, outside both branches, because the node candidate and
-            // the upgrade candidates must be ranked on the same baseline or the comparison is
-            // between a gain and a total.
-            const currentRate = hashRateOf(ns, isServer, currentNodes);
-            let nodeCandidate: UpgradeCandidate | null = null;
-            if (currentNodes < targetNodes) {
-                const nodeCost = ns.hacknet.getPurchaseNodeCost();
-                if (isFinite(nodeCost)) {
-                    // A fresh node's own starting production. It is not zero, so it can win on
-                    // value when nodes are still cheap — which is exactly when buying them is
-                    // right. See `newNodeRate`.
-                    nodeCandidate = {
-                        type: "NODE",
-                        nodeIndex: currentNodes,
-                        cost: nodeCost,
-                        rateAfter: currentRate + newNodeRate(ns, isServer),
-                    };
-                }
-            } else {
-                nodeCandidate = null;
-            }
 
             // ── Priority 2: the upgrade with the best hash rate per dollar ──
             //
@@ -414,74 +557,27 @@ export function tick(ns: NS, context: Context): void {
             // Formulas API there is nothing to compare, and the run falls back to cheapest —
             // the old behaviour — rather than guessing at production it cannot measure.
             if (!bestAction) {
-                const candidates: UpgradeCandidate[] = [];
-
-                // THE NODE JOINS THE CONTEST. Only when production spending is allowed, which is
-                // the same cache rule that gates the upgrades — a fleet full of hashes is not
-                // buying anything that produces more of them.
-                if (canUpgradeProduction && nodeCandidate !== null) candidates.push(nodeCandidate);
-
-                for (let i = 0; i < currentNodes; i++) {
-                    if (canUpgradeProduction) {
-                        const stats = ns.hacknet.getNodeStats(i);
-                        const levelCost = ns.hacknet.getLevelUpgradeCost(i, 1);
-                        if (isFinite(levelCost)) {
-                            const after = productionAfter(ns, isServer, stats, {
-                                level: stats.level + 1,
-                                ram: stats.ram,
-                                cores: stats.cores,
-                            });
-                            candidates.push({
-                                type: "LEVEL",
-                                nodeIndex: i,
-                                cost: levelCost,
-                                rateAfter: fleetRateAfter(currentRate, nodeRate(ns, isServer, stats), after),
-                            });
-                        }
-
-                        const ramCost = ns.hacknet.getRamUpgradeCost(i, 1);
-                        if (isFinite(ramCost)) {
-                            const after = productionAfter(ns, isServer, stats, {
-                                level: stats.level,
-                                ram: stats.ram * 2,
-                                cores: stats.cores,
-                            });
-                            candidates.push({
-                                type: "RAM",
-                                nodeIndex: i,
-                                cost: ramCost,
-                                rateAfter: fleetRateAfter(currentRate, nodeRate(ns, isServer, stats), after),
-                            });
-                        }
-
-                        const coreCost = ns.hacknet.getCoreUpgradeCost(i, 1);
-                        if (isFinite(coreCost)) {
-                            const after = productionAfter(ns, isServer, stats, {
-                                level: stats.level,
-                                ram: stats.ram,
-                                cores: stats.cores + 1,
-                            });
-                            candidates.push({
-                                type: "CORE",
-                                nodeIndex: i,
-                                cost: coreCost,
-                                rateAfter: fleetRateAfter(currentRate, nodeRate(ns, isServer, stats), after),
-                            });
-                        }
-                    }
-
-                    if (canUpgradeCache) {
-                        const cacheCost = ns.hacknet.getCacheUpgradeCost(i, 1);
-                        if (isFinite(cacheCost)) {
-                            // Cache has no production of its own; `bestUpgrade` excludes it from
-                            // the value contest, so its `rateAfter` is never consulted.
-                            candidates.push({ type: "CACHE", nodeIndex: i, cost: cacheCost, rateAfter: 0 });
-                        }
-                    }
-                }
+                const { candidates, currentRate } = rankAgain(
+                    ns, isServer, currentNodes, targetNodes, canUpgradeProduction, canUpgradeCache,
+                );
 
                 if (candidates.length === 0) {
-                    isMaxed = true;
+                    // EMPTY IS NOT THE SAME AS MAXED, and conflating the two latched the fleet
+                    // off permanently.
+                    //
+                    // `candidates` is empty for two very different reasons: every node is at
+                    // its ceiling (genuinely maxed, never recovers), OR this particular tick is
+                    // not allowed to buy anything — the hash cache is at the release threshold
+                    // and the cache is not yet full enough to upgrade. The second is a few
+                    // seconds of waiting, not the end of the run.
+                    //
+                    // `isMaxed` is sticky and drives `intervalMs`, so setting it on a busy tick
+                    // dropped the fleet to one purchase attempt per MINUTE, forever. It is only
+                    // maxed when production was actually ALLOWED and there was still nothing to
+                    // buy; otherwise the fleet keeps its normal tick and tries again shortly.
+                    if (canUpgradeProduction || canUpgradeCache) {
+                        isMaxed = true;
+                    }
                 }
 
                 // ONE RULE: BUY WHAT `bestUpgrade` SAYS, OR BUY NOTHING.
@@ -499,13 +595,19 @@ export function tick(ns: NS, context: Context): void {
                 // Both are gone. The best-value candidate is computed WITHOUT a budget filter,
                 // and then one question decides: can this pass pay for it?
                 //
-                //   yes -> buy it, and only it
+                //   yes -> buy it
                 //   no  -> buy nothing and let the budget carry over
                 //
                 // The second half is the point of the rule, not a side effect: spending on a
                 // worse upgrade does not capture any of the value the better one had, because
                 // the comparison is a RATIO. Money kept is money available next pass, and the
                 // best upgrade is reached sooner by waiting for it than by substituting for it.
+                //
+                // IT IS THE FIRST OF UP TO `PURCHASES_PER_PASS` BUYS rather than the only one.
+                // The substitute is still refused — every purchase below is the ranking's top
+                // choice for the money that is actually left, and the loop stops the moment the
+                // best remaining choice no longer fits — but a fleet that could afford four
+                // good upgrades no longer has to spend four ticks buying them one at a time.
                 const best = bestUpgrade(candidates, currentRate, Infinity);
                 lastBest = best;
 
@@ -519,48 +621,104 @@ export function tick(ns: NS, context: Context): void {
             // NOTHING TO BUY: no purchase this pass, and the budget carries over untouched.
             // Everything below runs only when the ranking chose something this pass could pay
             // for, so there is no path from here that buys a substitute.
-            if (bestAction) {
-            let bought = false;
-            switch (bestAction.type) {
-                case "NODE":
-                    // Announced by the shared line below, like every other purchase.
-                    bought = ns.hacknet.purchaseNode() >= 0;
-                    break;
-                case "LEVEL":
-                    bought = ns.hacknet.upgradeLevel(bestAction.nodeIndex!, 1);
-                    break;
-                case "RAM":
-                    bought = ns.hacknet.upgradeRam(bestAction.nodeIndex!, 1);
-                    break;
-                case "CORE":
-                    bought = ns.hacknet.upgradeCore(bestAction.nodeIndex!, 1);
-                    break;
-                case "CACHE":
-                    bought = ns.hacknet.upgradeCache(bestAction.nodeIndex!, 1);
-                    break;
-            }
-
-            if (bought) {
-
-            // EVERY PURCHASE IS ANNOUNCED, not just nodes.
             //
-            // Only `NODE` was announced, so level, RAM and core upgrades appeared with no log
-            // line at all: the console named one thing while the fleet silently bought another,
-            // and there was no record to check it against. The reported symptom — "it says
-            // 'node 0 core next' but is happily buying random levels" — was exactly this.
-            // Naming each one costs a line whenever something is bought, and a run that buys
-            // nothing pays nothing.
-            // "Bought" for a new node, "Upgraded" for the rest — a node is not an upgrade of
-            // anything, and the label for one reads "new node", which would otherwise log as
-            // "Upgraded new node".
-            const what = bestAction.type === "NODE"
-                ? `new node ${currentNodes}`
-                : upgradeLabel(bestAction.type, bestAction.nodeIndex);
-            announce(ns, "HACKNET", `${bestAction.type === "NODE" ? "Bought" : "Upgraded"} ${what} (${ns.format.number(bestAction.cost)})`, "tx");
+            // `retried` allows ONE re-rank per refused purchase, so a stale price cannot turn a
+            // burst of four buys into a burst of zero — but a genuine refusal still ends the
+            // pass rather than looping.
+            let retried = false;
+            //
+            // THE LOOP RE-RANKS AFTER EACH BUY, rather than walking the list it started with.
+            // Every hacknet price depends on the current state, so the candidate list is stale
+            // the instant anything is bought: a level upgrade's cost grows, the next server's
+            // price grows, and a node's own rate changes. Re-ranking costs one `bestUpgrade`
+            // over the already-built list and keeps each purchase the best value AT THE MOMENT
+            // IT IS MADE — which is the guarantee ADR-0004 actually cares about, and the reason
+            // this can repeat without ever buying a second choice.
+            for (let buy = 0; bestAction !== null && buy < PURCHASES_PER_PASS; buy++) {
+                const action: Action = bestAction;
+                let bought = false;
+                switch (action.type) {
+                    case "NODE":
+                        // Announced by the shared line below, like every other purchase.
+                        bought = ns.hacknet.purchaseNode() >= 0;
+                        break;
+                    case "LEVEL":
+                        bought = ns.hacknet.upgradeLevel(action.nodeIndex!, 1);
+                        break;
+                    case "RAM":
+                        bought = ns.hacknet.upgradeRam(action.nodeIndex!, 1);
+                        break;
+                    case "CORE":
+                        bought = ns.hacknet.upgradeCore(action.nodeIndex!, 1);
+                        break;
+                    case "CACHE":
+                        bought = ns.hacknet.upgradeCache(action.nodeIndex!, 1);
+                        break;
+                }
 
-            remaining -= bestAction.cost;
-            lastBought = bestAction;
-            }
+                // A REFUSED PURCHASE RE-RANKS ONCE, THEN ENDS THE PASS.
+                //
+                // The game refuses for reasons that are already stale by the time it answers:
+                // a hacknet price rises with every level and every new node, so a rank taken
+                // microseconds before the call can name a figure that no longer holds. That is
+                // a race, not a signal that nothing is worth buying — and ending the pass on it
+                // made a burst of four buys silently become a burst of zero.
+                //
+                // One retry against re-read prices separates the two cases. A genuine refusal
+                // (the thing is genuinely unaffordable, or the node is gone) refuses again and
+                // the pass ends with the budget untouched, as before.
+                if (!bought) {
+                    if (retried) break;
+                    retried = true;
+
+                    const fresh = rankAgain(ns, isServer, ns.hacknet.numNodes(), targetNodes, canUpgradeProduction, canUpgradeCache);
+                    const freshBest = bestUpgrade(fresh.candidates, fresh.currentRate, Infinity);
+                    lastBest = freshBest;
+                    bestAction = freshBest !== null && freshBest.cost <= remaining
+                        ? { type: freshBest.type, nodeIndex: freshBest.nodeIndex, cost: freshBest.cost }
+                        : null;
+                    if (bestAction === null) break;
+                    continue;
+                }
+                retried = false;
+
+                actionTaken = true;
+                purchasesThisTick++;
+                remaining -= action.cost;
+                lastBought = action;
+
+                // EVERY PURCHASE IS ANNOUNCED, not just nodes.
+                //
+                // Only `NODE` was announced, so level, RAM and core upgrades appeared with no log
+                // line at all: the console named one thing while the fleet silently bought another,
+                // and there was no record to check it against. The reported symptom — "it says
+                // 'node 0 core next' but is happily buying random levels" — was exactly this.
+                // Naming each one costs a line whenever something is bought, and a run that buys
+                // nothing pays nothing.
+                // "Bought" for a new node, "Upgraded" for the rest — a node is not an upgrade of
+                // anything, and the label for one reads "new node", which would otherwise log as
+                // "Upgraded new node".
+                const what = action.type === "NODE"
+                    ? `new node ${currentNodes}`
+                    : upgradeLabel(action.type, action.nodeIndex);
+                announce(ns, "HACKNET", `${action.type === "NODE" ? "Bought" : "Upgraded"} ${what} (${ns.format.number(action.cost)})`, "tx");
+
+                // ── Re-rank for the next buy ──
+                //
+                // The node and each upgrade's current price and yield are read again, so the
+                // ranking is never spending against figures from before the purchase. The
+                // remaining budget moves unchanged, so the next buy has to fit what is left.
+                //
+                // THE NODE COUNT IS RE-READ rather than reused: buying a node is the one
+                // purchase that changes how many of them there are, and ranking the next buy
+                // against the old count would price a second server at the first one's index.
+                const after = ns.hacknet.numNodes();
+                const next = rankAgain(ns, isServer, after, targetNodes, canUpgradeProduction, canUpgradeCache);
+                const bestNext = bestUpgrade(next.candidates, next.currentRate, Infinity);
+                lastBest = bestNext;
+                bestAction = bestNext !== null && bestNext.cost <= remaining
+                    ? { type: bestNext.type, nodeIndex: bestNext.nodeIndex, cost: bestNext.cost }
+                    : null;
             }
         }
 
@@ -660,6 +818,96 @@ export const HASH_CASH_FLOOR = 250_000_000;
 export const HASH_CAPACITY_RELEASE = 0.90;
 
 /**
+ * How many seconds of production an overflow sale may convert.
+ *
+ * A FULL POOL IS NOT A REASON TO SELL EVERYTHING, and the old dump did exactly that: it sold
+ * until the pool was back down to 70% of capacity, whatever that was worth. On a big fleet
+ * that is a large quantity of hashes spent on cash the run did not ask for, when the only
+ * thing that needed doing was making enough room to keep producing.
+ *
+ * The amount at risk is the amount that would otherwise be LOST — the overflow — and the
+ * cheapest way to express "enough room" is time: sell what ten seconds of production would
+ * overflow. That scales with the fleet automatically, so a fast fleet makes a bigger hole for
+ * itself and a slow one sells almost nothing, without either needing a tuned constant.
+ *
+ * TEN SECONDS is deliberately generous relative to one tick. The orchestrator ticks hacknet
+ * roughly once a second while not maxed, so ten seconds is ~10 ticks of headroom — long enough
+ * that the pool does not re-fill on the very next pass and re-sell immediately, which is what
+ * turns an overflow sale into a per-tick drain.
+ */
+export const OVERFLOW_SALE_SECONDS = 10;
+
+/**
+ * How many hashes an overflow sale should convert, given the fleet's rate.
+ *
+ * THE OVERFLOW, NOT THE POOL. Only hashes that cannot fit are being lost, so only that many
+ * need converting; everything above the free space is hashes the run chose to keep, and
+ * selling them spends them on cash by default rather than on whatever the run was saving for.
+ *
+ * `costPerSale` IS THE FLOOR, because the game sells in whole units. A pool with 40 hashes of
+ * overflow but a 100-hash sale price cannot make a partial sale — the choice is one sale or
+ * none, and one sale is correct when the alternative is losing the overflow outright.
+ *
+ * Returns 0 when there is nothing overflowing and nothing to gain, so a caller can tell
+ * "sell nothing" from "sell one unit".
+ */
+export function overflowSaleHashes(
+    hashes: number,
+    capacity: number,
+    ratePerSecond: number,
+    costPerSale: number,
+): number {
+    if (!(costPerSale > 0)) return 0;
+    if (!(capacity > 0)) return 0;
+
+    // Hashes over the cap. Nothing over the cap means nothing is being lost.
+    const overflow = hashes - capacity;
+    if (!(overflow > 0)) return 0;
+
+    // Ten seconds of production is what we expect to LOSE if the pool sits at the ceiling for
+    // the next few ticks, and that is the quantity worth converting. It is a CAP, not a
+    // floor: `min(overflow, horizon)` never sells more than is actually overflowing, and never
+    // more than ten seconds' worth even when far more is over the line.
+    //
+    // MIN RATHER THAN MAX, and getting this backwards is the whole bug. `max` made a fast
+    // fleet sell TEN SECONDS OF ITS ENTIRE OUTPUT — 2,000 hashes at 200 H/s — to solve a
+    // 300-hash overflow, which is the "sell everything" behaviour this function exists to
+    // replace, arrived at by a different route.
+    //
+    // Zero rate is the case where the fleet produces nothing, so a ceiling with hashes at it
+    // is not losing anything new — but `overflow` is still real, and selling it is the only
+    // way to make room. Hence the floor of one sale below, not a zero horizon here.
+    const horizon = ratePerSecond > 0
+        ? Math.min(overflow, ratePerSecond * OVERFLOW_SALE_SECONDS)
+        : overflow;
+
+    // Whole sale units, rounded up: a partial sale is not possible, and rounding down would
+    // leave the overflow still overflowing.
+    const sales = Math.ceil(horizon / costPerSale);
+    return sales * costPerSale;
+}
+
+/**
+ * How many times to sell, given the pool and rate. At most what is held, at least one.
+ *
+ * The count rather than the hash quantity, because every caller sells by repeatedly calling
+ * `spendHashes("Sell for Money")` and needs to know when to stop.
+ */
+export function overflowSaleCount(
+    hashes: number,
+    capacity: number,
+    ratePerSecond: number,
+    costPerSale: number,
+): number {
+    const wanted = overflowSaleHashes(hashes, capacity, ratePerSecond, costPerSale);
+    if (!(wanted > 0) || !(costPerSale > 0)) return 0;
+    // NEVER MORE SALES THAN THE POOL CAN PAY FOR. `wanted` is the quantity to convert and the
+    // pool may hold more than that; the bound is the pool, not the ceiling.
+    const affordable = Math.floor(hashes / costPerSale);
+    return Math.max(0, Math.min(Math.ceil(wanted / costPerSale), affordable));
+}
+
+/**
  * Whether the pool is COMPLETELY full, so hashes must be sold before anything else.
  *
  * SEPARATE FROM `hashSpendIsCashOnly`, and the difference is permission versus obligation.
@@ -721,11 +969,24 @@ export function cacheTooSmallForAnyUpgrade(capacity: number, dearestUpgradeHashe
  * instruction and also the only order that makes sense: the urgent thing first, the improvement
  * second.
  */
-export type HashPoolAction = "sell" | "cache" | "spend";
+export type HashPoolAction = "sell" | "sell-then-cache" | "cache" | "spend";
 
 export function hashActionAt(hashes: number, capacity: number, dearestUpgradeHashes: number): HashPoolAction {
-    if (mustSellForCapacity(hashes, capacity)) return "sell";
-    if (cacheTooSmallForAnyUpgrade(capacity, dearestUpgradeHashes)) return "cache";
+    const full = mustSellForCapacity(hashes, capacity);
+    const tooSmall = cacheTooSmallForAnyUpgrade(capacity, dearestUpgradeHashes);
+
+    // BOTH, WHEN BOTH ARE TRUE, and that combination is the one that was missing.
+    //
+    // A sale is urgent and must happen first: hashes are being lost this instant. But a sale
+    // that refills the pool leaves the ceiling exactly as it was, so the next tick sells again
+    // — and the tick after that. Selling alone never fixes a pool too small to hold anything:
+    // it just keeps emptying a pool that keeps overflowing.
+    //
+    // Ordering the two could not express this. Whichever came first swallowed the other; the
+    // answer is that the pass does both, sale first because it is the urgent half.
+    if (full && tooSmall) return "sell-then-cache";
+    if (full) return "sell";
+    if (tooSmall) return "cache";
     return "spend";
 }
 
@@ -850,27 +1111,49 @@ function reachable(target: number, cash: number): boolean {
 
 function spendHashes(ns: NS, context: Context): void {
     const capacity = ns.hacknet.hashCapacity();
-    if (capacity <= 0) return;
 
-    const hashes = ns.hacknet.numHashes();
+    // NO CAPACITY YET IS NOT "NOTHING TO DO". `dearestUpgradeHashes` does not need a pool of
+    // its own, and the cache branch is reached only when a pool exists — but returning here
+    // meant a fleet whose servers had no cache yet never bought one. The guards that actually
+    // matter are inside the branches.
+    const hashes = capacity > 0 ? ns.hacknet.numHashes() : 0;
     const action = hashActionAt(hashes, capacity, dearestUpgradeHashes(ns));
 
     /*
-     * ── A FULL POOL SELLS FIRST, before the cache rule gets a turn ──
+     * ── A FULL POOL SELLS FIRST ──
      *
      * The order is a decision, not an incidental: see `hashActionAt`. A full pool is losing
      * hashes this instant and a sale is what produces the cash that pays for a cache upgrade,
-     * so the urgent thing goes first. Checking cache first — which is what this did — meant a
-     * full small pool bought cache forever and never sold a hash.
+     * so the urgent thing goes first.
+     *
+     * `sell-then-cache` is the case that was missing. Selling alone leaves the ceiling exactly
+     * where it was, so the pool refills and the next tick sells again — the reported "den køber
+     * ikke cache level når der ikke kan være flere hashes". One sale makes room; the cache
+     * purchase on the same pass stops the next hundred ticks being identical.
      */
-    if (action === "sell") {
-        // One sale is enough to make room; the sizing below is skipped deliberately, because
-        // this is not a cash target and there is no gap to close.
+    if (action === "sell" || action === "sell-then-cache") {
+        // ONE SALE IS NOT ALWAYS ENOUGH ANY MORE — see below. The full-pool case still sells
+        // first and urgently, because hashes are being lost this instant, but it sells the
+        // OVERFLOW rather than one arbitrary unit or the whole pool.
         const cost = ns.hacknet.hashCost("Sell for Money");
-        if (isFinite(cost) && cost > 0 && ns.hacknet.spendHashes("Sell for Money")) {
-            announce(ns, "HACKNET", `Sold ${cost} hashes — pool full (${ns.format.number(hashes)}/${ns.format.number(capacity)})`, "tx");
+        if (isFinite(cost) && cost > 0) {
+            const rate = hashRateOf(ns, true, ns.hacknet.numNodes());
+            const sales = overflowSaleCount(hashes, capacity, rate, cost);
+            let sold = 0;
+            for (let i = 0; i < sales; i++) {
+                if (!ns.hacknet.spendHashes("Sell for Money")) break;
+                sold++;
+            }
+            if (sold > 0) {
+                announce(ns, "HACKNET", `Sold ${sold * cost} hashes — pool full (${ns.format.number(hashes)}/${ns.format.number(capacity)})`, "tx");
+                if (action === "sell") return;
+                // Room made; fall through to raise the ceiling that caused the overflow.
+            } else if (action === "sell") {
+                return;
+            }
+        } else if (action === "sell") {
+            return;
         }
-        return;
     }
 
     /*
@@ -884,7 +1167,7 @@ function spendHashes(ns: NS, context: Context): void {
      * different currency — which is why this lives here rather than in `chooseHashUpgrade`.
      * That function answers "which hash upgrade", and cache is not one.
      */
-    if (action === "cache") {
+    if (action === "cache" || action === "sell-then-cache") {
         // The node whose cache is cheapest to raise, by the same value logic as production:
         // any node's cache raises the fleet's ceiling, so the cheapest one is the right buy.
         let best = -1;
@@ -967,10 +1250,29 @@ function spendHashes(ns: NS, context: Context): void {
     // ── 2. DUMPING & SCALING UPGRADES ──
     // spendHashes() buys exactly ONE upgrade per call. Loop until we can't
     // afford another, hit the loop safeguard, or the purchase fails.
-    const overageTarget = capacity * 0.70;
     const isDumpUpgrade =
         chosen.upgrade === "Sell for Money" ||
         chosen.upgrade === "Sell for Corporation Funds";
+
+    // HOW MANY TIMES TO DUMP, when this upgrade is a dump.
+    //
+    // THIS USED TO BE "SELL UNTIL THE POOL IS DOWN TO 70%", which on a large fleet converts an
+    // enormous quantity of hashes to cash to solve a problem whose size was the overflow. The
+    // pool only has to come back under the ceiling far enough to keep producing; anything
+    // beyond that is hashes spent on money nobody asked for, at the opportunity cost of
+    // whatever the run was otherwise saving them for.
+    //
+    // Sized as ten seconds of production — see `overflowSaleHashes` — so the hole scales with
+    // the fleet. Non-dump upgrades (Bladeburner rank, gym training, a course) are unaffected
+    // and still buy as many as the pool affords, because those are the hashes' actual purpose.
+    let dumpRemaining = 0;
+    if (isDumpUpgrade) {
+        const cost = ns.hacknet.hashCost(chosen.upgrade);
+        if (isFinite(cost) && cost > 0) {
+            const rate = hashRateOf(ns, true, ns.hacknet.numNodes());
+            dumpRemaining = overflowSaleCount(hashes, capacity, rate, cost);
+        }
+    }
 
     let totalBought = 0;
     let loopSafeguard = 1000;
@@ -983,8 +1285,10 @@ function spendHashes(ns: NS, context: Context): void {
         if (!ns.hacknet.spendHashes(chosen.upgrade, chosen.target)) break;
         totalBought += 1;
 
-        // For dump upgrades, stop once we've dropped down to the overage target
-        if (isDumpUpgrade && ns.hacknet.numHashes() <= overageTarget) break;
+        // For dump upgrades, stop once the overflow is paid for rather than once the pool is
+        // empty of overage. `dumpRemaining` is 0 both when nothing needs dumping and when
+        // there is no overflow, and in either case a dump must not run at all.
+        if (isDumpUpgrade && --dumpRemaining <= 0) break;
     }
 
     if (totalBought > 0) {
