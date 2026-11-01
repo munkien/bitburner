@@ -163,6 +163,23 @@ export interface Reserves {
     stockAccessCash: number;
     /** RAM withheld on home for the orchestrator and for standalone scripts. */
     homeRamGb: number;
+    /**
+     * How fast cash is arriving, in dollars per second, or null when nothing is measured.
+     *
+     * NOT MONEY WITHHELD, unlike the two fields above — it lives here because this is the
+     * one structure every money-spending feature already reads, and because the two reserves
+     * that need it are written by DIFFERENT features at DIFFERENT priorities: progression
+     * (40) decides the augmentation reserve and `home.ts` (20) decides the stock-chain one,
+     * so `home.ts` runs before progression and cannot read a figure progression measured.
+     * Publishing it here means the first writer of the pass makes it available to the rest,
+     * and a second writer cannot disagree about it.
+     *
+     * The figure itself is measured from home cash over `RATE_WINDOW_MS` by
+     * `observeIncome` — see `rate-tracker.ts` for why it is measured rather than assumed.
+     * Null means no evidence, and both reserve rules read that as "protect nothing", which
+     * is the direction that keeps an early run spending rather than freezing it.
+     */
+    incomePerSecond: number | null;
 }
 
 export interface Context {
@@ -516,7 +533,7 @@ export function createRecent(ns: NS): RecentLines {
 }
 
 export function createReserves(): Reserves {
-    return { cash: 0, stockAccessCash: 0, homeRamGb: 0 };
+    return { cash: 0, stockAccessCash: 0, homeRamGb: 0, incomePerSecond: null };
 }
 
 /**

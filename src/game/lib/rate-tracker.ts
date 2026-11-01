@@ -166,3 +166,74 @@ export function budgetRatio(gap: number, rate: number | null, budgetSeconds: num
     if (!Number.isFinite(budgetSeconds) || budgetSeconds <= 0) return Infinity;
     return gap / rate / budgetSeconds;
 }
+
+/* ─── INCOME, AS A RATE ─── */
+
+/**
+ * How fast cash is arriving, as a rate sample, or null when nothing is measured.
+ *
+ * SEPARATE FROM THE STAT RATES DELIBERATELY. `MeasuredStat` is the set of TRAINING
+ * measures, and every consumer indexes a `Record<MeasuredStat, ...>` keyed by stat name —
+ * adding "money" to that union would make a hacking-rate lookup able to ask for a cash
+ * rate and still compile. Income is a different question with the same arithmetic.
+ *
+ * The arithmetic IS shared, through `observe`. That is the point: the measurement window,
+ * the staleness rule and the refusal to floor a rate upward are properties of measuring
+ * anything over time, and a second copy of those rules is a second thing to disagree with.
+ * The one difference is the direction of "good": a falling balance is not a negative rate
+ * to divide into a gap, and `observe` already clamps at zero.
+ *
+ * Measured from HOME CASH rather than `player.money`. The two differ when money is in the
+ * stock market, and the reserve is spent from home cash — measuring the wrong one would
+ * make a run that keeps its wealth invested look like it earns nothing.
+ */
+export interface IncomeSample {
+    /**
+     * Dollars per second. Never negative: a balance that FALL is a purchase, not a
+     * negative income, and `observe` already clamps for exactly this reason.
+     */
+    readonly rate: number;
+    /** The timestamp the measurement was taken at, in ms. */
+    readonly at: number;
+}
+
+/** The open income observation, waiting for enough elapsed time to become a rate. */
+export interface OpenIncome {
+    readonly value: number;
+    readonly at: number;
+}
+
+/**
+ * Take a cash reading and, once enough time has passed, produce a rate.
+ *
+ * Shaped exactly like `observe` and for the same reason: time arrives as a parameter, so a
+ * test can simulate an hour of earning in a few lines. The window is the same
+ * `RATE_WINDOW_MS`, because an income rate averaged over a different period than a stat
+ * rate would make the two budgets incomparable.
+ */
+export function observeIncome(
+    open: OpenIncome | null,
+    cash: number,
+    now: number,
+): { open: OpenIncome; rate: IncomeSample | null } {
+    if (open === null) return { open: { value: cash, at: now }, rate: null };
+
+    const elapsedMs = now - open.at;
+    if (elapsedMs < RATE_WINDOW_MS) return { open, rate: null };
+
+    const gained = cash - open.value;
+    return {
+        open: { value: cash, at: now },
+        // Clamped at zero for the reason `observe` gives: money that LEFT the account is a
+        // purchase or a loss, not a negative earning rate. A negative rate divided into a
+        // shortfall would produce a negative ETA and read as "already affordable".
+        rate: { rate: Math.max(0, gained / (elapsedMs / 1000)), at: now },
+    };
+}
+
+/** The income rate, or null when there is none or it is too old to describe the run. */
+export function incomeFor(sample: IncomeSample | null, now: number): number | null {
+    if (sample === null) return null;
+    if (now - sample.at > RATE_STALE_MS) return null;
+    return sample.rate;
+}

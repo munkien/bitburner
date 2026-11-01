@@ -161,3 +161,105 @@ test("NeuroFlux is still skipped when it is the cheapest thing on offer", () => 
     buyAffordableAugments(ns, player, [ORDINARY], silentLog());
     assert.deepEqual(ns.purchases, [], "NeuroFlux was bought once everything else was owned");
 });
+
+/* ─── MUST-BUY AUGMENTATIONS ─── */
+
+/**
+ * An `ns` where price is explicit per augmentation, so "cheaper but better" is expressible.
+ *
+ * The existing fixture prices everything at zero, which cannot show the defect: with every
+ * price equal, highest-price-wins has no preference to get wrong.
+ */
+function pricedNs(prices: Record<string, number>, rep = 1e12): NS {
+    return pricedNsWithRep(prices, () => rep);
+}
+
+/** The same, with reputation per augmentation so a rep gate can be exercised. */
+function pricedNsWithRep(prices: Record<string, number>, repOf: () => number, repReqOf: () => number = () => 0): NS {
+    const names = Object.keys(prices);
+    return {
+        singularity: {
+            getOwnedAugmentations: () => [],
+            getFactionRep: repOf,
+            getFactionFavor: () => 0,
+            getAugmentationsFromFaction: () => names,
+            getAugmentationPrereq: () => [],
+            getAugmentationRepReq: repReqOf,
+            getAugmentationPrice: (aug: string) => prices[aug],
+            purchaseAugmentation: () => true,
+            donateToFaction: () => false,
+            getCurrentWork: () => null,
+        },
+        gang: { inGang: () => false, getGangFaction: () => null },
+        print: () => {},
+        tprint: () => {},
+        toast: () => {},
+        format: { number: (n: number) => String(n), ram: (n: number) => String(n) },
+    } as unknown as NS;
+}
+
+test("a must-buy augmentation beats a more expensive one", () => {
+    // THE BUG, in the shape it was reported: "it does not buy Neuroreceptor Management
+    // Implant before very late game". The implant is cheap because its value is a MECHANIC
+    // (it removes the focus penalty) rather than a multiplier, and the selector picks the
+    // highest price — so any expensive multiplier outbids it forever, whatever the run does.
+    reset();
+    const EXPENSIVE = "Congruity Implant";
+    const ns = pricedNs({
+        "Neuroreceptor Management Implant": 5e6,
+        [EXPENSIVE]: 5e9,
+    });
+
+    assert.equal(
+        getBestAugmentation(ns, fakePlayer(), [])?.name,
+        "Neuroreceptor Management Implant",
+        "the expensive multiplier outbid a must-buy, which is the whole defect",
+    );
+});
+
+test("The Blade's Simulacrum is a must-buy, under the game's exact name", () => {
+    // THE NAME IS THE TEST as much as the ordering is. `sleeves.ts` records a check that
+    // compared against "Blade's Simulacrum" while the game's own string is "The Blade's
+    // Simulacrum" — a comparison that could never match, failing silently. An entry with
+    // the wrong name here would be equally silent: never recognised, never bought, and the
+    // capability it unlocks never available.
+    reset();
+    const ns = pricedNs({
+        "The Blade's Simulacrum": 5e6,
+        "Congruity Implant": 5e9,
+    });
+
+    assert.equal(
+        getBestAugmentation(ns, fakePlayer(), [])?.name,
+        "The Blade's Simulacrum",
+        "the Simulacrum was outbid, or is listed under a name the game never reports",
+    );
+});
+
+test("a must-buy whose reputation is not met does not stall the run", () => {
+    // Reputation cannot be bought with the reserve this protects. Preferring a must-buy
+    // unconditionally would make it the target forever on a faction the player has not
+    // earned the rep for, and `plannedReserve` would hold cash against a purchase that can
+    // never be made — the same failure NeuroFlux would cause if it were ever a target.
+    reset();
+    // No reputation held, and the must-buy needs 1000 of it. The first version of this test
+    // had a requirement of ZERO, which the must-buy legitimately met — the failure was the
+    // test describing the wrong situation, not the code misbehaving, and it is worth saying
+    // so because "must-buy ignored the rep gate" and "the fixture never set one" look
+    // identical from the assertion.
+    const ns = pricedNsWithRep(
+        { "Neuroreceptor Management Implant": 5e6, "Congruity Implant": 5e9 },
+        () => 0,
+        () => 1000,
+    );
+
+    // With the requirement out of reach and no donatable faction in this fixture, the
+    // must-buy must not become the target; the ordinary candidate is equally gated, so the
+    // honest answer is null rather than a permanently unsatisfiable target.
+    const target = getBestAugmentation(ns, fakePlayer(), []);
+    assert.notEqual(
+        target?.name,
+        "Neuroreceptor Management Implant",
+        "a must-buy with unmet reputation became the target, which can never be satisfied",
+    );
+});

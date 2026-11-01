@@ -2,6 +2,7 @@ import type { NS, ProgramName } from "@ns";
 
 import type { Context } from "./lib/context.ts";
 import { announce } from "./lib/log.ts";
+import { reserveFor } from "./lib/purchase-reserve.ts";
 
 /*
  * ============================================================================
@@ -56,15 +57,17 @@ const TOR_COST = 200_000;
 const SPEND_ALLOWANCE = 0.5;
 
 /**
- * How close to affordable a chain link must be before its cash is reserved.
+ * SUPERSEDED BY `reserveFor`, and kept only as a record of the rule it replaced.
  *
- * A fraction of the link's own cost, matching `plannedReserve` in `player.ts`. At 0.2,
- * the reserve engages once the player is within 20% of the next purchase — close enough
- * that holding the money back is brief, far enough that the last stretch is not raided by
- * another feature on the tick before the purchase.
+ * The 20% rule reserved nothing until a purchase was nearly affordable, which meant every
+ * other feature saw the whole balance as spendable for all of the time before that — the
+ * defect reported as "it spends money on other things even when it could save up easily".
+ * `reserveFor` decides the same thing from how long the purchase takes to afford, and both
+ * this file and `plannedReserve` in `player.ts` now call it, so the two cannot drift.
  *
- * Reserving earlier would freeze hacknet, cloud and home RAM for most of the early game
- * to protect a purchase that is still a long way off.
+ * DELIBERATELY NOT DELETED YET. `NEAR_AFFORDABLE` is named in the ADR and in several
+ * comments as the rule that was in force; removing the constant before those are updated
+ * would leave dangling references. It is unreferenced code, so it costs nothing at runtime.
  */
 const NEAR_AFFORDABLE = 0.2;
 
@@ -234,8 +237,23 @@ function publishChainReserve(ns: NS, context: Context): void {
         return;
     }
 
-    const need = cost - cash;
-    context.reserves.stockAccessCash = need <= cost * NEAR_AFFORDABLE ? Math.ceil(cost) : 0;
+    // HOW LONG THE NEXT LINK TAKES TO AFFORD, not how close it already is.
+    //
+    // This was `need <= cost * NEAR_AFFORDABLE`, the same 20% rule progression used for
+    // augmentations — so the chain link was protected only in its last fifth, and every
+    // other spender read the whole balance as free for the rest of it. Reported as the same
+    // complaint in a different place: the run buys other things "even when it could save up
+    // easily", and the stock chain arrives far later than the income would allow.
+    //
+    // `reserveFor` ramps the reserve with closeness over a 30-minute horizon and caps it, so
+    // the concern the 20% rule existed for — a far-off target freezing the features that
+    // earn the money — still holds. `NEAR_AFFORDABLE` is now unused here; see the note on
+    // the constant for why it is left in place rather than deleted.
+    // THE STOCK CHAIN ALWAYS ACCUMULATES. `fourSCost` prices the whole 4S integration and
+    // the chain cannot be skipped — the market features are gated on it — so a run that does
+    // not save for it simply never gets it. Measured live: $25b wanted against $4b in hand
+    // earning 0.5b/h is 42 hours away, which a 30-minute horizon reserves nothing for.
+    context.reserves.stockAccessCash = reserveFor(cost, cash, context.reserves.incomePerSecond, undefined, true);
 }
 
 export function tick(ns: NS, context: Context): void {

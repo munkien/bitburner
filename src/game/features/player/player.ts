@@ -7,7 +7,8 @@ import { findScriptOnHome } from "../../lib/scripts.ts";
 // but would not compile".
 import { REACH_SEC, floorEtaSeconds, floorReachable } from "../../lib/training-budget.ts";
 import { TRAIN_CAP_MS, TRAIN_COOLDOWN_MS, capApplies, noteTraining, releaseIfTrainingStopped, trainCapVerdict } from "../../lib/training-cap.ts";
-import { observe, rateFor, type MeasuredStat, type OpenSample, type RateSample } from "../../lib/rate-tracker.ts";
+import { incomeFor, observe, observeIncome, rateFor, type IncomeSample, type MeasuredStat, type OpenIncome, type OpenSample, type RateSample } from "../../lib/rate-tracker.ts";
+import { reserveFor } from "../../lib/purchase-reserve.ts";
 import {
     belowFloor,
     karmaFarmingWanted as karmaFarmingWantedPure,
@@ -230,6 +231,16 @@ let lastWarn = "";
 let lastReserve = -1;
 const rates: Partial<Record<MeasuredStat, RateSample>> = {};
 let openSample: OpenSample | null = null;
+/**
+ * The measured income rate and its open observation.
+ *
+ * Separate from `rates` because that map is keyed by TRAINING measures — see the note on
+ * `IncomeSample`. Cleared by `reset` for the same reason `rates` is: this is module state,
+ * and a test asserting "no income measured yet" must not inherit a rate from the test
+ * before it.
+ */
+let incomeSample: IncomeSample | null = null;
+let openIncome: OpenIncome | null = null;
 
 /**
  * Forget everything this feature remembers between ticks.
@@ -248,6 +259,8 @@ export function reset(): void {
     lastWarn = "";
     lastReserve = -1;
     openSample = null;
+    incomeSample = null;
+    openIncome = null;
     // The promotion cadence is per company and outlives a tick. Clearing it on reset means
     // a test (or a reintroduced feature) does not inherit another's timers — the same
     // reason `rates` is cleared here rather than left to rot.
@@ -310,13 +323,26 @@ export function tick(ns: NS, context: Context): void {
     // there. The grafting feature takes over instead (see lib/registry.ts).
     const canBuyAugs = context.capabilities.has("augmentPurchase");
 
+    const { player } = context.snapshot;
+    trackRate(ns, player);
+
+    // INCOME BEFORE THE RESERVE, and the order is the fix rather than a detail. The reserve
+    // is now decided by how long the purchase takes to afford, which needs the measured
+    // income — asking for it before it had been sampled this tick meant the figure was
+    // always one window stale, and on the first tick of a run permanently absent.
+    trackIncome(ns, player);
+
+    // PUBLISHED SO `home.ts` CAN USE IT TOO. Progression runs at priority 40 and `home.ts`
+    // at 20, so `home.ts` has already decided its stock-chain reserve by the time this is
+    // measured — it reads the value the PREVIOUS pass left here, which is a one-window lag
+    // on a figure that changes over minutes rather than ticks. The alternative was a second
+    // income tracker inside `home.ts`, which is a second measurement that can disagree.
+    context.reserves.incomePerSecond = measuredIncome();
+
     // Progression writes the cash reserve: it is the only feature that knows an
     // augmentation purchase is coming, and every feature that spends money reads
     // this field rather than a shared file.
-    context.reserves.cash = plannedReserve(ns, context.snapshot.player, canBuyAugs);
-
-    const { player } = context.snapshot;
-    trackRate(ns, player);
+    context.reserves.cash = plannedReserve(ns, player, canBuyAugs);
 
     // Publish the rate model so the activity slot's yield signal can apply the same
     // reachability rule the training decision does. Without this the two disagree: this
@@ -1433,6 +1459,47 @@ interface AugSelectionFilter {
 }
 
 /**
+ * Augmentations whose VALUE IS NOT THEIR PRICE, and which the run should buy first.
+ *
+ * THE SELECTION RULE IS "HIGHEST PRICE WINS", which is a defensible proxy for the stat
+ * multipliers that make up most of the pool: a more expensive multiplier is usually a
+ * better one. It fails for exactly the augmentations that are cheap because their value is
+ * a MECHANIC rather than a number, and each of these was reported as "the run does not buy
+ * it before very late game":
+ *
+ *   Neuroreceptor Management Implant
+ *       Removes the focus penalty. Cheap, early-game priced, and it affects EVERY action
+ *       the player takes for the rest of the run. `ensureFocus` already reads it on every
+ *       tick to decide whether to focus at all — so the framework was coding against an
+ *       augmentation it would never choose to buy.
+ *
+ *   The Blade's Simulacrum
+ *       Stops Bladeburner actions occupying the activity slot, so the division and the
+ *       player's own work run at once. `caps.ts` gates a whole capability on it, and half
+ *       the slot-contention machinery in `activity.ts` is written to relax when it is
+ *       owned. Cheap against the stat multipliers, and outbid by all of them forever.
+ *
+ * Because the rule is highest-price-wins, an augmentation that is cheaper than the most
+ * expensive thing available is never selected — no matter how much better it is. These two
+ * are therefore bought as soon as their reputation is met, ahead of everything else.
+ *
+ * A CURATED LIST, and it should stay short. Every entry is a claim that price is the wrong
+ * measure of this augmentation, which needs an argument rather than a preference — see the
+ * doc comments on both capability probes for what each one actually changes. An entry that
+ * cannot make that argument belongs in the ordinary pool and will be bought when its price
+ * says so.
+ *
+ * NAMES MUST MATCH THE GAME'S EXACTLY. `sleeves.ts` carries a note about comparing against
+ * "Blade's Simulacrum" while the game's own string is "The Blade's Simulacrum" — a check
+ * that could never have matched. Getting a name wrong here fails silently in exactly the
+ * same way: the augmentation is simply never recognised as a must-buy.
+ */
+const MUST_BUY_AUGMENTS: readonly string[] = [
+    "Neuroreceptor Management Implant",
+    "The Blade's Simulacrum",
+];
+
+/**
  * Buy every unowned augmentation the player can already afford, cheapest check first.
  *
  * NO NEUROFLUX GOVERNOR, and it is the only augmentation excluded here. It is skipped
@@ -1533,6 +1600,19 @@ export function getBestAugmentation(
 
             const price = ns.singularity.getAugmentationPrice(aug);
             const candidate: AugTarget = { name: aug, faction, price, repRequired, currentRep };
+
+            // MUST-BUY FIRST, AND REPUTATION-GATED RATHER THAN PRICE-GATED. These are the
+            // augmentations whose value is a mechanic rather than a multiplier, so their
+            // cheapness is not a signal of their worth — see `MUST_BUY_AUGMENTS`. Returning
+            // immediately is the point: they must not lose a price comparison to anything.
+            //
+            // `repRequired` still applies, because reputation cannot be bought with the
+            // reserve this protects — a must-buy whose rep is not met is not yet purchasable
+            // and must not stall the run forever. The donation path below still covers it
+            // when this faction can be donated to.
+            if (MUST_BUY_AUGMENTS.includes(aug) && currentRep >= repRequired) {
+                return candidate;
+            }
 
             if (currentRep < repRequired && canDonateToReach(ns, candidate, player, favor)) {
                 if (!donationBest || price > donationBest.price) donationBest = candidate;
@@ -1706,6 +1786,39 @@ function donateForRep(ns: NS, target: AugTarget, player: Player, recent: RecentL
  * every feature that spends money respects it. It used to be published through
  * `reserve_money.txt`, which cloud and hacknet read with a fallback of 0.
  */
+/**
+ * Measure how fast cash is arriving, so the reserve can ask whether a purchase is close.
+ *
+ * Read from HOME CASH rather than `player.money`: the two differ while wealth is in the
+ * stock market, and the reserve is spent from home cash. Measuring the wrong one would make
+ * a run that keeps its money invested look like it earns nothing — the exact case the
+ * reserve matters most in, since that is a run with wealth to protect.
+ *
+ * A READS THROW IS NOT AN ERROR HERE. `getServer("home")` needs no RAM but can still fail
+ * on a node whose API is unavailable, and falling back to `player.money` keeps the rate
+ * being measured on the same scale rather than silently reading zero and reporting "no
+ * income", which would switch the reserve off without saying so.
+ */
+function trackIncome(ns: NS, player: Player): void {
+    let cash: number;
+    try {
+        // `moneyAvailable` is optional on the server object, and undefined for a host the
+        // API reports incompletely. `?? player.money` covers it on the same scale rather
+        // than reading zero, which would look like a run that earns nothing.
+        cash = ns.getServer("home").moneyAvailable ?? player.money;
+    } catch {
+        cash = player.money;
+    }
+    const measured = observeIncome(openIncome, cash, Date.now());
+    openIncome = measured.open;
+    if (measured.rate !== null) incomeSample = measured.rate;
+}
+
+/** The usable income rate, or null when none has been measured or it has gone stale. */
+function measuredIncome(): number | null {
+    return incomeFor(incomeSample, Date.now());
+}
+
 function plannedReserve(ns: NS, player: Player, canBuyAugs: boolean): number {
     // No purchases to save for: on BitNode 8 augmentations come from grafting,
     // not from a reserve.
@@ -1720,9 +1833,26 @@ function plannedReserve(ns: NS, player: Player, canBuyAugs: boolean): number {
         : 0;
     const need = target.price + donation;
 
-    // Only reserve once the purchase is nearly affordable, otherwise the reserve
-    // would freeze every other feature's spending for a far-off target.
-    return need - player.money <= need * 0.2 ? Math.ceil(need) : 0;
+    // HOW LONG DOES IT TAKE TO AFFORD, not how close is it already.
+    //
+    // This used to be `need - player.money <= need * 0.2`, which reserves NOTHING until the
+    // balance is within 20% of the price — so every other feature read the whole account as
+    // spendable and the run could never accumulate toward a distant target. The reported
+    // form was three separate complaints that are one defect:
+    //
+    //   "it does not buy Neuroreceptor Management Implant before very late game"
+    //   "it does not buy The Blade's Simulacrum before very late game"
+    //   "it spends money on other things even when it could save up easily"
+    //
+    // The 20% rule had a real concern behind it — reserving for a far-off target freezes
+    // every other spender, and those spenders are how the money is earned. `reserveFor`
+    // keeps that concern by ramping the reserve with closeness over a 30-minute horizon
+    // and capping it, so a target hours away is still not protected while one the run can
+    // pay for soon is.
+    // `accumulate` FOR THE MUST-BUYS. A cheap mechanic augmentation would otherwise never be
+    // protected on a run whose income puts it outside the horizon — and cheapness is exactly
+    // what `MUST_BUY_AUGMENTS` exists to say is not a measure of its worth.
+    return reserveFor(need, player.money, measuredIncome(), undefined, MUST_BUY_AUGMENTS.includes(target.name));
 }
 
 // ─── Companies ───
