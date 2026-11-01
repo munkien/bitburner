@@ -188,7 +188,20 @@ export interface NexusState {
     queued?: number;
     queue?: NexusGoal[];
     features?: NexusFeature[];
-    reserves?: { cash?: number; homeRamGb?: number };
+    /**
+     * Every reserve in force, mirroring `src/shared/types.ts`.
+     *
+     * KEPT IN STEP BY HAND, which is the drift this file already warns about for `stall` —
+     * and it has now happened here: the shared type grew and this copy did not, so the
+     * orchestrator failed to compile against its own state. The fields added are the
+     * stock-chain reserve and the measured income the other two are derived from.
+     */
+    reserves?: {
+        cash?: number;
+        stockAccessCash?: number;
+        homeRamGb?: number;
+        incomePerSecond?: number | null;
+    };
     /**
      * When the retirement stall clock comes due, or absent when it is not counting.
      *

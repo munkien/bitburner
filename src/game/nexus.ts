@@ -540,7 +540,25 @@ function formatGoalValue(ns: NS, key: SubGoalKey, value: number): string {
 }
 
 /**
+ * A measured income rate, as a per-hour figure.
+ *
+ * PER HOUR RATHER THAN PER SECOND, because it is read next to prices. `$139k/s` means
+ * nothing to a reader deciding whether a $25b purchase is close; `$0.50b/h` is a sentence
+ * they can finish. The game's own formatter has no rate unit, so the multiplication happens
+ * here rather than being pushed into `ns.format`.
+ *
+ * `unknown` rather than `0`: no measurement and an income of zero are different facts, and
+ * both reserve rules read them the same way — as no evidence — so the line must not claim
+ * the run is earning nothing when it simply has not measured yet.
+ */
+function formatIncome(ns: NS, perSecond: number | null): string {
+    if (perSecond === null || !Number.isFinite(perSecond)) return "unknown";
+    return `${ns.format.number(perSecond * 3600)}/h`;
+}
+
+/**
  * One goal, on a line: its name, progress, and what is still outstanding.
+ *
  * Short enough for the dashboard, which is redrawn every pass: the full breakdown lives in
  * doctor.ts, and this is the summary a glance needs.
  */
@@ -672,7 +690,17 @@ function describeNexus(
             // goals something loaded can serve.
             movable: [...state.meta.movable],
         })),
-        reserves: { cash: reserves.cash, homeRamGb: reserves.homeRamGb },
+        // EVERY RESERVE, for the same reason the console line prints them all: a figure the
+        // telemetry omits is one the dashboard cannot show, and the reported symptom was a
+        // panel reading "reserved cash 0" while the run was holding back billions.
+        // `incomePerSecond` is carried because it is the input both reserve decisions share,
+        // so a reader can check the reserve against the rate that produced it.
+        reserves: {
+            cash: reserves.cash,
+            stockAccessCash: reserves.stockAccessCash,
+            homeRamGb: reserves.homeRamGb,
+            incomePerSecond: reserves.incomePerSecond,
+        },
         // Spread rather than assigned, so an absent clock is an ABSENT FIELD and not a
         // `null` the UI has to distinguish from "waiting". The two states the console
         // must not confuse are "no clock" and "clock about to expire", and leaving the
@@ -773,9 +801,20 @@ function report(ns: NS, states: readonly FeatureStatus[], context: Context): voi
     // is the usual cause and the reserve line only shows what is being held back.
     const used = ns.getServerUsedRam("home");
     const total = ns.getServerMaxRam("home");
+    // EVERY RESERVE, because this line is the answer to "why is that feature not spending"
+    // and a reserve it does not name is one a reader will assume is zero.
+    //
+    // Reported missing: the line read `cash 0.000` while the framework was holding back an
+    // augmentation reserve and a stock-chain reserve at the same time. `Reserves` carries
+    // four figures and this printed two of them — and of the two it printed, `cash` is the
+    // one most often zero, so the line could show all zeroes while the run was reserving
+    // gigabytes and billions. Named individually rather than summed, because which reserve
+    // is in force is the question; the total is available by adding them up.
     ns.print(
         `Reserves: cash ${ns.format.number(context.reserves.cash)}, ` +
-        `home RAM ${context.reserves.homeRamGb} GB held`,
+        `stock ${ns.format.number(context.reserves.stockAccessCash)}, ` +
+        `home RAM ${context.reserves.homeRamGb} GB held, ` +
+        `income ${formatIncome(ns, context.reserves.incomePerSecond)}`,
     );
     ns.print(`Home RAM: ${ns.format.ram(used, 2)} / ${ns.format.ram(total, 2)} used`);
 

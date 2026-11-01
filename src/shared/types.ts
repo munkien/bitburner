@@ -252,8 +252,23 @@ export interface NexusState {
     queue?: NexusGoal[];
     /** One line per feature the orchestrator knows about. */
     features?: NexusFeature[];
-    /** The reserves in force right now, in the orchestrator's own units. */
-    reserves?: { cash?: number; homeRamGb?: number };
+    /**
+     * The reserves in force right now, in the orchestrator's own units.
+     *
+     * ALL OF THEM. This carried only `cash` and `homeRamGb`, so the two reserves added later
+     * — the stock-access chain and the measured income the other two are derived from — had
+     * nowhere to appear, and the panel showed "reserved cash 0" on a run holding back
+     * billions. A reserve the wire drops is a reserve no reader can see.
+     *
+     * `incomePerSecond` is nullable rather than optional, because "measured, and it is zero"
+     * and "not measured yet" are different facts that the reserve rules already distinguish.
+     */
+    reserves?: {
+        cash?: number;
+        stockAccessCash?: number;
+        homeRamGb?: number;
+        incomePerSecond?: number | null;
+    };
     /**
      * When the retirement stall clock comes due, or absent when it is not counting.
      *

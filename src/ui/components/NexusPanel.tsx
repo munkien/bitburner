@@ -146,18 +146,44 @@ export function NexusPanel({ nexus }: { nexus: NexusState }) {
                 )}
             </div>
 
+            {/* EVERY RESERVE THAT IS IN FORCE, and the panel appears when ANY of them is.
+                It used to test only `cash` and `homeRamGb`, so a run holding back a
+                stock-chain reserve showed nothing at all — the row was hidden by the very
+                condition that should have revealed it. Reported as the console line reading
+                `cash 0.000` while billions were reserved.
+
+                Zero-valued reserves are omitted rather than shown as 0.00: a reserve of zero
+                is not a fact about the run, and listing it invites reading it as "nothing is
+                being held back" when a neighbour on the same row says otherwise. */}
             {nexus.reserves &&
                 ((nexus.reserves.cash ?? 0) > 0 ||
+                    (nexus.reserves.stockAccessCash ?? 0) > 0 ||
                     (nexus.reserves.homeRamGb ?? 0) > 0) && (
                     <dl className="stats">
-                        <dt className="stats__label">reserved cash</dt>
-                        <dd className="stats__value">
-                            {moneyFull(nexus.reserves.cash ?? 0)}
-                        </dd>
-                        <dt className="stats__label">reserved RAM</dt>
-                        <dd className="stats__value">
-                            {nexus.reserves.homeRamGb ?? 0} GB
-                        </dd>
+                        {(nexus.reserves.cash ?? 0) > 0 && (
+                            <>
+                                <dt className="stats__label">reserved cash</dt>
+                                <dd className="stats__value">
+                                    {moneyFull(nexus.reserves.cash ?? 0)}
+                                </dd>
+                            </>
+                        )}
+                        {(nexus.reserves.stockAccessCash ?? 0) > 0 && (
+                            <>
+                                <dt className="stats__label">reserved for stock access</dt>
+                                <dd className="stats__value">
+                                    {moneyFull(nexus.reserves.stockAccessCash ?? 0)}
+                                </dd>
+                            </>
+                        )}
+                        {(nexus.reserves.homeRamGb ?? 0) > 0 && (
+                            <>
+                                <dt className="stats__label">reserved RAM</dt>
+                                <dd className="stats__value">
+                                    {nexus.reserves.homeRamGb ?? 0} GB
+                                </dd>
+                            </>
+                        )}
                     </dl>
                 )}
 
