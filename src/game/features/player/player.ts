@@ -876,6 +876,8 @@ function passiveTasks(ns: NS, player: Player, recent: RecentLines, canBuyAugs: b
     const host = findBackdoor(ns, player);
     if (host) runBackdoor(ns, host);
 
+    promoteEveryHeldJob(ns, player, Date.now());
+
     tryCreateGang(ns, player, canCreateGang);
 
     const owned = ns.singularity.getOwnedAugmentations(true);
@@ -1374,6 +1376,32 @@ export function maybePromote(ns: NS, company: CompanyName, now: number): void {
 }
 
 /**
+ * Ask for a promotion at EVERY company the player holds a job at.
+ *
+ * WHY THIS IS NOT LEFT TO THE WORK PATH. `maybePromote` is called from `assignAction`, which
+ * only runs for the action the priority chain actually chose — so promotions were attempted
+ * only on ticks where working at that company happened to be the chosen action. Any long
+ * stretch of something else (a training block, a Bladeburner chain, a graft) held the slot for
+ * hours, and during all of it no application was made at any company. Reputation accrues
+ * whether or not the player is at work, so the position should follow it whether or not the
+ * player is at work; the two are independent facts.
+ *
+ * A PASSIVE TASK, in the same sense as the backdoor and the augment purchases above: it does
+ * not start work and does not take the activity slot, so it belongs on the every-path hook
+ * rather than in the chain. `maybePromote` carries its own once-a-minute-per-company cadence,
+ * so sweeping every held job here costs one `applyToCompany` per company per minute at most —
+ * the same bound the work path had, now without depending on being chosen.
+ *
+ * Not a `PlayerAction` for the reason `tryCreateGang` gives: that union is a set of ONGOING
+ * activities, and this is a one-shot that either succeeds or does not.
+ */
+function promoteEveryHeldJob(ns: NS, player: Player, now: number): void {
+    for (const company of Object.keys(player.jobs)) {
+        maybePromote(ns, company as CompanyName, now);
+    }
+}
+
+/**
  * Keep focus set to whatever the player's augmentations call for.
  *
  * `Neuroreceptor Management Implant` removes the focus penalty, so with it the
@@ -1865,10 +1893,33 @@ function corpHackingReq(ns: NS, company: CompanyName): number | null {
     }
 }
 
-function bestCompany(ns: NS, player: Player): CompanyName | null {
+/**
+ * Exported for `company.test.ts`. The ORDER of the two guards inside is the whole bug it
+ * exists to pin — a held job must outrank faction membership — and that order is invisible
+ * from `prioritizeAction`, which needs most of a run to reach.
+ */
+export function bestCompany(ns: NS, player: Player): CompanyName | null {
     return MEGACORPS.find(c => {
-        if (isMemberOf(player, c)) return false;
+        // A HELD JOB OUTRANKS FACTION MEMBERSHIP, and the order of these two lines is the
+        // whole bug behind "better positions are not applied for".
+        //
+        // A megacorp is BOTH a company and a company faction, and joining the faction is the
+        // normal consequence of working there long enough. So `isMemberOf` becomes true for
+        // exactly the company the player is employed by — and with the membership test first,
+        // that company was then rejected, `bestCompany` returned null, `prioritizeAction`
+        // stopped choosing a COMPANY action, and `maybePromote` was never reached again.
+        //
+        // The promotion path is only reachable from the work path, so losing the choice to
+        // work there silently ends promotion for the rest of the run. The player keeps the
+        // job and the entry-level title, rep accrues at the entry rate, and nothing anywhere
+        // reports a problem — which is why this looked like "promotions are not applied for"
+        // rather than "the run stopped going to work".
+        //
+        // Keeping the job is checked FIRST because it is the stronger fact: membership says
+        // "you have access here", a job says "you are employed here right now". Only a company
+        // the player does NOT work at is skipped for membership.
         if (player.jobs[c]) return true;
+        if (isMemberOf(player, c)) return false;
         const req = corpHackingReq(ns, c);
         return req !== null && player.skills.hacking >= req;
     }) ?? null;

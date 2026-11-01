@@ -26,7 +26,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ensureCompanyJob, maybePromote, reset } from "./player.ts";
+import { bestCompany, ensureCompanyJob, maybePromote, reset } from "./player.ts";
 
 /** Mirrors the constant in `player.ts`; tested through the behaviour, not imported. */
 const PROMOTION_INTERVAL_MS = 60_000;
@@ -41,6 +41,8 @@ function fakeNs(
     const ns = {
         calls,
         getPlayer: () => ({ jobs }) as unknown as Player,
+        print: () => { },
+        tryWritePort: () => true,
         singularity: {
             applyToCompany: (company: string, field: string) => {
                 calls.push([company, field]);
@@ -218,4 +220,90 @@ test("a promotion that does not happen is not attempted at all when unemployed t
     maybePromote(ns, "ECorp" as CompanyName, 0);
 
     assert.deepEqual(ns.calls, [], "promoted a player who does not work there");
+});
+
+/* ─── a held job survives faction membership ─── */
+
+test("a company the player works at is still chosen after joining its faction", () => {
+    // THE BUG BEHIND "better positions are not applied for".
+    //
+    // A megacorp is both a company and a company faction, and joining the faction is the
+    // ordinary consequence of working there. `bestCompany` tested membership FIRST, so the
+    // one company the player was employed by became the one company it refused to choose.
+    //
+    // `maybePromote` is only reachable from the work path, so losing the choice to work there
+    // silently ended promotion: the job and its entry-level title stayed, rep accrued at the
+    // entry rate, and nothing reported a problem.
+    const player = {
+        jobs: { ECorp: "Software Engineering Intern" },
+        factions: ["ECorp"],
+        skills: { hacking: 500 },
+    } as unknown as Player;
+
+    assert.equal(
+        bestCompany({} as NS, player),
+        "ECorp",
+        "an employer was rejected because the player had joined its faction",
+    );
+});
+
+test("membership still excludes a company the player does NOT work at", () => {
+    // The other half, which must not be lost: membership means access, so re-hiring where the
+    // player is already a member is pointless — but only when there is no job there.
+    const player = {
+        jobs: { ECorp: "Software Engineering Intern" },
+        factions: ["ECorp", "NWO"],
+        skills: { hacking: 500 },
+    } as unknown as Player;
+
+    const chosen = bestCompany({} as NS, player);
+    assert.notEqual(chosen, "NWO", "a faction-only company was chosen for hiring");
+});
+
+test("every held job is swept, not only the one being worked at", () => {
+    // THE INDEPENDENCE THIS WAS SPLIT FOR. Promotion used to run only from the work path,
+    // for the action the priority chain chose — so a long training block or a Bladeburner
+    // chain held the slot for hours and no application was made anywhere. Reputation accrues
+    // whether or not the player is at work, so the position should follow it regardless.
+    reset();
+    const ns = fakeNs(
+        { ECorp: "Software Engineering Intern", NWO: "IT Intern" },
+        () => "promoted",
+    );
+
+    // The sweep `promoteEveryHeldJob` performs, driven directly.
+    for (const company of Object.keys(ns.getPlayer().jobs)) {
+        maybePromote(ns, company as CompanyName, 0);
+    }
+
+    assert.deepEqual(
+        ns.calls.map(([c]) => c).sort(),
+        ["ECorp", "NWO"],
+        "a held job was skipped because the player was not working there",
+    );
+});
+
+test("the sweep stays inside the once-a-minute cadence", () => {
+    // The cost bound the work path had is unchanged: sweeping every company every tick would
+    // be one `applyToCompany` per company per tick, which is the thing the cadence exists to
+    // prevent.
+    reset();
+    const ns = fakeNs(
+        { ECorp: "Software Engineering Intern", NWO: "IT Intern" },
+        () => "promoted",
+    );
+
+    const sweep = (now: number) => {
+        for (const company of Object.keys(ns.getPlayer().jobs)) {
+            maybePromote(ns, company as CompanyName, now);
+        }
+    };
+
+    // Ten ticks inside one minute: two calls, one per company.
+    for (let i = 0; i < 10; i++) sweep(i * 1_000);
+    assert.equal(ns.calls.length, 2, `expected two attempts in a minute, got ${ns.calls.length}`);
+
+    // Past the interval: two more.
+    sweep(PROMOTION_INTERVAL_MS);
+    assert.equal(ns.calls.length, 4, "the sweep never advanced past its cadence");
 });
