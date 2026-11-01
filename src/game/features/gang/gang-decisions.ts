@@ -307,7 +307,18 @@ export function scanEnemies(
  * ============================================================ */
 
 export type ModeReason =
-    | "wanted-cleanup" | "engaged" | "weaker-than-enemy"
+    | "wanted-cleanup"
+    /**
+     * A committed crew is holding the level and the RATE turned negative doing it.
+     *
+     * Distinct from `wanted-cleanup`, which means the level is currently rising or the
+     * penalty is short. This one means neither is true and the crew is still working — so a
+     * reader seeing it learns the gang is mid-cleanup rather than that it has nothing to do.
+     * Without the distinction the mode released the crew the moment it succeeded, which is
+     * the two-second loop this exists to name.
+     */
+    | "wanted-held"
+    | "engaged" | "weaker-than-enemy"
     | "respect-phase" | "money-phase"
     /**
      * Home cash is below `moneyFloor`. Distinct from `money-phase`, which means the
@@ -446,14 +457,14 @@ export function decideMode(
     // the check that actually fires for a run between the two thresholds, and guarding
     // only the panic gate left a growing gang told to earn money anyway.
     if (!c.recruitingPhase && floorIsReachable(c.moneyFloor, netWorth) && netWorth < c.moneyFloor) {
-        if (wantedNeedsAttention(g, c, wantedEngaged)) {
-            return { mode: "WANTED", reason: "wanted-cleanup" };
-        }
+        const attention = wantedAttentionReason(g, c, wantedEngaged);
+        if (attention !== null) return { mode: "WANTED", reason: attention };
         return { mode: "MONEY", reason: "below-money-floor" };
     }
 
-    if (wantedNeedsAttention(g, c, wantedEngaged)) {
-        return { mode: "WANTED", reason: "wanted-cleanup" };
+    {
+        const attention = wantedAttentionReason(g, c, wantedEngaged);
+        if (attention !== null) return { mode: "WANTED", reason: attention };
     }
 
     // Hacking gangs fight nobody, so territory is never the goal. Note that this skips
@@ -882,6 +893,56 @@ export function wantedNeedsAttention(
         ? c.wantedPenaltyTarget + WANTED_RELEASE_MARGIN
         : c.wantedPenaltyTarget;
     return (canStillFall && g.wantedPenalty < penaltyBar) || g.wantedLevelGainRate > 0;
+}
+
+/**
+ * Why the wanted level should still be worked on, or null when it should not be.
+ *
+ * THE RATE CLAUSE ABOVE CANNOT SEE ITS OWN CAUSE, and that is a two-second loop. With a
+ * penalty already at full the penalty half is dead, so the decision rests entirely on
+ * `wantedLevelGainRate > 0` — and assigning cleaners is what makes that rate negative. So:
+ *
+ *   crew off -> rate +0.43 -> "needs attention" -> crew assigned
+ *   crew on  -> rate -0.32 -> "nothing to do"    -> crew released
+ *   crew off -> rate +0.43 -> ...
+ *
+ * Measured live in `runs/2026-11-01T16.36.05.158Z--3`: 148 WANTED frames against 264 MONEY
+ * frames, alternating every two seconds, with the level cycling 9.3 -> 15.8 -> 9.3 while the
+ * penalty sat at 100% throughout and every other input was identical.
+ *
+ * THE COMMITMENT IS WHAT BREAKS IT. While the floor is holding a crew, a negative rate is
+ * not evidence that the job is finished — it is the crew doing its job. The release then
+ * happens on the floor rule (`atFloorReadings`, the level genuinely at 1) or when the
+ * commitment's hold expires, both of which are facts about the LEVEL rather than about the
+ * rate the crew itself controls.
+ *
+ * Returned as a reason rather than a boolean because the two entry paths are different
+ * questions, and a reader diagnosing the loop needs to know which one answered: the rate
+ * fired, or the commitment held.
+ */
+export function wantedAttentionReason(
+    g: Pick<GangGenInfo, "wantedLevel" | "wantedLevelGainRate" | "wantedPenalty">,
+    c: GangConfig,
+    /**
+     * Whether a cleanup crew is COMMITTED, not merely assigned.
+     *
+     * The distinction is the whole point. "Assigned" is re-read every tick and follows the
+     * assignment the decision itself just made, which is what closes the loop; "committed"
+     * is the latched state in `WantedFloor`, which outlives it.
+     */
+    committed = false,
+): "wanted-cleanup" | "wanted-held" | null {
+    // The floor of the scale is a fact about the LEVEL, so it outranks the commitment: a
+    // crew working at 1 is working for nothing, and `atFloorReadings` already requires two
+    // consecutive readings before releasing so one bad frame cannot tear it down.
+    if (g.wantedLevel <= WANTED_LEVEL_FLOOR && g.wantedLevelGainRate <= 0) return null;
+
+    if (g.wantedPenalty < c.wantedPenaltyTarget) return "wanted-cleanup";
+    if (g.wantedLevelGainRate > 0) return "wanted-cleanup";
+
+    // The rate is not rising and the penalty is not short. Without a commitment that is
+    // genuinely nothing to do; with one, the crew is what suppressed the rate.
+    return committed ? "wanted-held" : null;
 }
 
 /**

@@ -447,7 +447,40 @@ export function tick(ns: NS, context: Context): void {
     // toggles with it and members slam between Terrorism and Human Trafficking.
     const wantedEngaged = members.some(m => m.task === specials.wanted);
 
-    const { mode, reason } = decideMode(g, config, isHacking, enemies, netWorth, wantedEngaged);
+    // Measured once per tick, from the gang's own state rather than from the size of last
+    // tick's crew, and before both decisions that read it.
+    const wantedPressure = wantedPressureFor(gang, g, members, specials);
+
+    // THE WANTED FLOOR IS ASKED BEFORE THE MODE, and the order is the fix.
+    //
+    // `decideMode` was told whether cleaners happen to be on the task RIGHT NOW, while the
+    // floor's own commitment — the latched crew and its hold — was computed afterwards and
+    // never reached it. So the mode followed the transient reading rather than the
+    // commitment, and the two disagreed within one tick: assign cleaners and the reading
+    // says "engaged", release them and it says "not engaged", and each flip is immediately
+    // correct by its own lights.
+    //
+    // Measured live in `runs/2026-11-01T16.33.58.399Z`: MODE alternated
+    // `WANTED:wanted-cleanup` and `MONEY:below-money-floor` every two seconds for 98
+    // transitions, with respect, power, territory and penalty byte-identical across every
+    // one of them. The wanted level cycled 19.9 -> 1.0 -> 19.9 in the same window: the crew
+    // arrives, clears the level to the floor, the mode releases it, the level climbs back.
+    //
+    // The commitment is what is supposed to end that cycle, and the fix is for the mode to
+    // read it. `engaged` is therefore true while the floor is HOLDING, not merely while
+    // somebody is assigned.
+    const crew = wantedFloor.crewFor(
+        {
+            level: g.wantedLevel,
+            netRate: g.wantedLevelGainRate,
+            cleaners: wantedPressure.cleaners,
+            bestRate: wantedPressure.bestCleanupRate,
+            members: members.length,
+        },
+        Date.now(),
+    );
+
+    const { mode, reason } = decideMode(g, config, isHacking, enemies, netWorth, crew.size > 0);
     log.change(
         "mode", "MODE", `${mode}:${reason}`,
         `respect=${fmt(g.respect)}/${fmt(config.respectPhaseEnd)} power=${fmt(g.power)} ` +
@@ -457,36 +490,10 @@ export function tick(ns: NS, context: Context): void {
     const tasks = gang.tasks();
     const gear = gang.gear();
 
-    // How hard the wanted level is pushing, measured once per tick from the gang's
-    // own state rather than from the size of last tick's crew. Shared with the doctor
-    // so the reported crew and the assigned crew come from one measurement.
-    const wantedPressure = wantedPressureFor(gang, g, members, specials);
-
-    // How many members the level needs to hold, from the LATCHED requirement.
-    //
-    // NOT re-derived from `wantedRise` each tick, which is what caused the reported flip
-    // between Vigilante Justice and Human Trafficking: that figure adds the current cleaners
-    // back to the net rate, so assigning a cleaner removes the need for one and releasing it
-    // restores the need. See `holdRequirement` — the requirement latches until the level has
-    // actually fallen, and `wantedHoldSince` is the level it latched at.
-    const now = Date.now();
-
-    // THE WANTED FLOOR, through its own interface.
-    //
-    // This used to be five module-level latches maintained here, an engage/release protocol
-    // written out inline, and an eight-parameter call to `holdRequirement`. All of it was the
-    // decision's own memory and its own protocol, so all of it moved into `WantedFloor`.
-    // What is left is a reading in and a crew out.
-    const crew = wantedFloor.crewFor(
-        {
-            level: g.wantedLevel,
-            netRate: g.wantedLevelGainRate,
-            cleaners: wantedPressure.cleaners,
-            bestRate: wantedPressure.bestCleanupRate,
-            members: members.length,
-        },
-        now,
-    );
+    // The floor's answer, from above. The requirement is LATCHED rather than re-derived
+    // from `wantedRise` each tick — that figure adds the current cleaners back to the net
+    // rate, so assigning a cleaner removes the need for one and releasing it restores the
+    // need. See `holdRequirement`.
     const wantedHoldCrew = crew.size;
     const wantedHoldReason = crew.reason;
 
