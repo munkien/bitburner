@@ -23,7 +23,7 @@ import { GOAL_TARGETS } from "../../lib/objective.ts";
 import { GANG_CHOICE_FLAG, GANG_KARMA, chosenGangKind, gangFactionFor, gangKindOf, type GangKind } from "../../lib/gangs.ts";
 import { ChangeLog, announce, note, publishStatus, type RecentLines } from "../../lib/log.ts";
 import { bladeburnerKeepsSlot, hasActiveBlackOp, hasActiveGraft, publishTrainingRate, trainingRemaining, trainingWantedHeld, winnableBlackOp } from "./activity.ts";
-import type { Context } from "../../lib/context.ts";
+import { surplus, type Context } from "../../lib/context.ts";
 import type {
     CityName,
     CompanyName,
@@ -390,7 +390,7 @@ export function tick(ns: NS, context: Context): void {
     // `passiveTasks` runs on every path, whoever holds the slot: backdoors,
     // augment purchases and donations never touch the activity slot, so gating
     // them on it would starve them whenever any work was running.
-    passiveTasks(ns, player, context.recent, canBuyAugs, context.capabilities.has("createGang"));
+    passiveTasks(ns, player, context.recent, canBuyAugs, context.capabilities.has("createGang"), reservedFor(context));
 
     // A Bladeburner black op owns the slot. Progression yields in both cases:
     //
@@ -519,7 +519,7 @@ export function tick(ns: NS, context: Context): void {
         return;
     }
 
-    const chosen = prioritizeAction(ns, player, context.goal, context.goals, context.recent, canBuyAugs, context.capabilities.has("createGang"));
+    const chosen = prioritizeAction(ns, player, context.goal, context.goals, context.recent, canBuyAugs, context.capabilities.has("createGang"), reservedFor(context));
     if (chosen === null) {
         reason = "nothing to do: the priority chain returned no action";
         return;
@@ -717,6 +717,14 @@ export function prioritizeAction(
     recent: RecentLines,
     canBuyAugs: boolean,
     canCreateGang: boolean,
+    /**
+     * Cash the augment buyer must not spend, from the reserves in force.
+     *
+     * A PARAMETER RATHER THAN THE CONTEXT, because this function is exported and tested for
+     * its ORDER, and threading a whole context through would make every ordering test build
+     * one. The figure is all it needs.
+     */
+    reservedCash = 0,
 ): PlayerAction | null {
     // 1. Backdoor faction servers
     const host = findBackdoor(ns, player);
@@ -802,7 +810,7 @@ export function prioritizeAction(
     // 5. Buy any affordable augments, then travel if a city faction is
     //    waiting on us, then work toward the next augment target.
     const owned = ns.singularity.getOwnedAugmentations(true);
-    if (canBuyAugs) buyAffordableAugments(ns, player, owned, recent);
+    if (canBuyAugs) buyAffordableAugments(ns, player, owned, recent, reservedCash);
 
     const travel = travelForFaction(ns, player, owned);
     if (travel) return travel;
@@ -881,7 +889,15 @@ export function prioritizeAction(
 
 /** Things that never touch the player's current action: backdoors, augment
  *  purchases and faction donations. */
-function passiveTasks(ns: NS, player: Player, recent: RecentLines, canBuyAugs: boolean, canCreateGang: boolean): void {
+function passiveTasks(
+    ns: NS,
+    player: Player,
+    recent: RecentLines,
+    canBuyAugs: boolean,
+    canCreateGang: boolean,
+    /** Cash reserved this pass; the augment buyer must not spend it. */
+    reservedCash: number,
+): void {
     const host = findBackdoor(ns, player);
     if (host) runBackdoor(ns, host);
 
@@ -890,7 +906,7 @@ function passiveTasks(ns: NS, player: Player, recent: RecentLines, canBuyAugs: b
     tryCreateGang(ns, player, canCreateGang);
 
     const owned = ns.singularity.getOwnedAugmentations(true);
-    if (canBuyAugs) buyAffordableAugments(ns, player, owned, recent);
+    if (canBuyAugs) buyAffordableAugments(ns, player, owned, recent, reservedCash);
 
     if (canBuyAugs) {
         const target = getBestAugmentation(ns, player, owned);
@@ -1555,7 +1571,54 @@ const MUST_BUY_AUGMENTS: readonly string[] = [
  * Exported for that test alone — nothing else calls it, and `passiveTasks` passes the
  * locked `owned` list whose mutation-on-purchase the caller relies on.
  */
-export function buyAffordableAugments(ns: NS, player: Player, owned: string[], recent: RecentLines): void {
+/**
+ * What the buyer may NOT spend, from the reserves in force this pass.
+ *
+ * THE WHOLE POINT IS THE SHARED FUNCTION. `surplus()` is where every other spender learns
+ * what is free, and it subtracts BOTH money reserves — the augmentation one and the
+ * stock-access chain — because to a spender they mean the same thing. Reading
+ * `reserves.cash` alone here would have the buyer respect one reserve and raid the other,
+ * which is a subtler version of the defect this fixes.
+ *
+ * `surplus` returns cash, not "money minus reserve", so the figure handed to the buyer is
+ * derived the same way: the reserve in force is whatever `homeCash` has above the surplus.
+ * Expressed that way rather than as `reserves.cash + reserves.stockAccessCash` so that a
+ * reserve added later is respected without this function being edited — the buyer cannot
+ * disagree with the other spenders about what is free, because both ask the same function.
+ */
+function reservedFor(context: Context): number {
+    const cash = context.snapshot.homeCash;
+    const free = surplus(context.snapshot, context.reserves);
+    return Math.max(0, cash - free);
+}
+
+export function buyAffordableAugments(
+    ns: NS,
+    player: Player,
+    owned: string[],
+    recent: RecentLines,
+    /**
+     * Cash this feature must NOT spend, from `context.reserves`.
+     *
+     * THE BUYER USED TO IGNORE IT ENTIRELY, and it was the one spender that did. Every
+     * other money feature routes through `surplus()`, which is where the reserve is
+     * subtracted — the buyer compared `player.money < price` directly, so the money
+     * `plannedReserve` had just set aside was spent by the very feature that set it aside.
+     *
+     * That defeated the reserve from INSIDE. `reserveFor` holds a capped fraction of the
+     * balance for a must-buy so the run can reach an augmentation it would otherwise be
+     * outbid on; a cheaper augmentation bought with the reserved cash IS that outbidding,
+     * performed by the feature doing the reserving.
+     *
+     * Passed rather than read from a `Context` because this module already imports the game
+     * and `lib/context.ts` must not import back — taking the figure keeps the dependency
+     * pointing one way and makes the rule assertable without standing up a whole context.
+     *
+     * Defaults to 0, which is "no reserve in force": the honest reading for a caller that
+     * has none, and what a test that does not care about reserves wants.
+     */
+    reservedCash = 0,
+): void {
     // THE GANG FACTION IS INCLUDED, deliberately.
     //
     // This loop used to skip it, and nothing else bought gang augmentations either — the
@@ -1582,7 +1645,13 @@ export function buyAffordableAugments(ns: NS, player: Player, owned: string[], r
                 if (currentRep < ns.singularity.getAugmentationRepReq(aug)) continue;
 
                 const price = ns.singularity.getAugmentationPrice(aug);
-                if (player.money < price) continue;
+                // THE SURPLUS, not the balance. `player.money` counts money another feature
+                // has already spoken for, and spending it is what makes a reserve advisory
+                // rather than binding. Recomputed inside the loop because `player.money` is
+                // decremented by each purchase above, so this tracks what is left FREE as
+                // the loop goes rather than re-reading a stale figure.
+                const spendable = Math.max(0, player.money - reservedCash);
+                if (spendable < price) continue;
 
                 if (ns.singularity.purchaseAugmentation(faction, aug)) {
                     note(recent, "ACTION", `Purchased ${aug} from ${faction} (${ns.format.number(price)})`, "tx");
