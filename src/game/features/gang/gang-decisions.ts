@@ -145,15 +145,17 @@ export interface GangConfig {
      * ANY rival were beatable would have the gang commit to a war it loses the moment a
      * stronger gang contests it, and a lost clash costs both respect and power.
      *
-     * 0.90 rather than the 0.60 this was. The clash model is
-     * `own.power / (own.power + their.power)`, so 0.9 means roughly NINE TIMES the
-     * strongest rival's power — an overwhelming margin rather than a favourable one.
+     * The clash model is `own.power / (own.power + their.power)`, so a bar of 0.8 means
+     * roughly FOUR TIMES the strongest rival's power. It was 0.90 — nine times — and then
+     * 0.60 before that.
      *
-     * WHAT IT COSTS, because this is not free. The gang fights less often and stays in
-     * `WARFARE_PREP` longer building power, so territory grows more slowly and the
-     * `territoryEnableBelow` gate takes longer to clear. The `DISENGAGE` bar moves with
-     * it (see `disengageChance`), so a gang already fighting now holds until the chance
-     * falls to about 0.63 where it previously let go at about 0.42.
+     * WHY 0.80 RATHER THAN NINE TIMES. 0.90 is not a wrong reading of the risk, it is an
+     * expensive one: the gang spends most of a run in `WARFARE_PREP` building power instead
+     * of taking ground, and territory grows correspondingly slowly. A clash won four times
+     * in five pays for its losses with the ground the wins take.
+     *
+     * The `DISENGAGE` bar derives from this (see `disengageChance`), so it moves with it —
+     * to 0.56 at this setting, where 0.90 put it at 0.63 and 0.60 put it at 0.42.
      */
     territoryMinClashChance: number;
     territoryWorkerFraction: number;
@@ -233,7 +235,20 @@ export const GANG_CONFIG_DEFAULT: GangConfig = {
     respectMoneyShare: 0.25,
     territoryEnableBelow: 0.90,
     territoryDisableAbove: 0.999995,
-    territoryMinClashChance: 0.9,
+    /**
+     * THE BAR IS 0.80. A clash won four times in five is worth starting: the ground taken in
+     * the eighty pays for the twenty that are lost, and the gang stops sitting in
+     * `WARFARE_PREP` waiting for a certainty that arrives far more slowly.
+     *
+     * WAS 0.90, which is the note above's "overwhelming margin rather than a favourable one".
+     * That reasoning is not wrong so much as expensive: at 0.90 the gang spends most of a run
+     * preparing rather than fighting, and territory — the thing the preparation exists for —
+     * grows correspondingly slowly.
+     *
+     * The exit bar derives from this (`disengageChance` is `bar * 0.7`), so it moves to 0.56
+     * with it. Nothing restates the figure.
+     */
+    territoryMinClashChance: 0.8,
     territoryWorkerFraction: 1.0,
     territoryStandingMinMembers: 8,
     minHomeCash: 50e6,
@@ -1477,8 +1492,8 @@ export function decideWarfare(
     //
     // A RATIO of the engage bar rather than a figure of its own, so retuning the bar
     // cannot leave the disengage chance above it — which would make the gang drop out
-    // of a war it had just decided to start, every tick. At the current 0.90 this puts
-    // the exit at about 0.63.
+    // of a war it had just decided to start, every tick. At the current 0.80 this puts
+    // the exit at 0.56.
     const disengageChance = c.territoryMinClashChance * 0.7;
 
     if (!g.territoryWarfareEngaged) {
