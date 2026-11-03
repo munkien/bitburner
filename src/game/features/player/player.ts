@@ -282,6 +282,11 @@ export function reset(): void {
     // kind of leak that makes a later test fail for a reason nothing in it explains.
     lastAugment = null;
     targetAugment = null;
+    // A STALE FAILURE WOULD OUTLIVE THE SITUATION that produced it: the next scenario would
+    // render its first backdoor line with this one's cause. `reset` is the promise a test
+    // makes to itself, and this is exactly the kind of module state that breaks it — the
+    // same leak this function was extended to fix once already.
+    backdoorFailure = null;
     reason = "starting";
     gangKindLabel = undefined;
 }
@@ -301,6 +306,17 @@ let targetAugment: AugTarget | null = null;
  * as the situation is, so this costs one line per transition.
  */
 let reason = "starting";
+
+/**
+ * Why the last backdoor attempt failed, or null when it started.
+ *
+ * MODULE STATE because `assignAction` returns a boolean and the line is built in `tick`,
+ * one frame up. Carrying it as a field rather than widening every return type keeps the
+ * change to the two places that care: the attempt, and the sentence.
+ *
+ * Cleared on every attempt, so a success cannot leave a previous failure on the line.
+ */
+let backdoorFailure: BackdoorFailure | null = null;
 
 /**
  * The gang kind this run committed to, for the status line.
@@ -607,9 +623,15 @@ export function tick(ns: NS, context: Context): void {
     const verified = started && (!occupiesSlot || activeSlotHolder(ns) !== null);
     reason = !started
         ? `could not start ${describeAction(action)}${
-            action.kind === "GYM" || action.kind === "UNI"
-                ? ` (in ${currentCityOf(ns)}, wanted ${action.city ?? "Sector-12"})`
-                : ""
+            // THE CAUSE, when it is known. A backdoor fails for two reasons with two
+            // different responses — wait for a sync, or wait for RAM — and "could not start
+            // backdoor CSEC" alone said neither. Measured live: 56 seconds of that line while
+            // home was full at 8191.85/8192 GB, reported as a blocked run.
+            action.kind === "BACKDOOR" && backdoorFailure !== null
+                ? ` (${BACKDOOR_FAILURE_TEXT[backdoorFailure]})`
+                : action.kind === "GYM" || action.kind === "UNI"
+                    ? ` (in ${currentCityOf(ns)}, wanted ${action.city ?? "Sector-12"})`
+                    : ""
         }`
         : travelledTo !== null
             ? `travelling to ${travelledTo} (chose ${chosen.kind})`
@@ -899,7 +921,12 @@ function passiveTasks(
     reservedCash: number,
 ): void {
     const host = findBackdoor(ns, player);
-    if (host) runBackdoor(ns, host);
+    // The RESULT IS DELIBERATELY IGNORED here. `passiveTasks` runs on every pass whoever
+    // holds the slot, so it exists to keep the worker alive rather than to report on it; the
+    // status line is built by `tick` from the attempt `assignAction` makes, which is the one
+    // the reader sees. Calling it here as well is what keeps the backdoor progressing on
+    // passes where the priority chain chose something else.
+    if (host) void runBackdoor(ns, host);
 
     promoteEveryHeldJob(ns, player, Date.now());
 
@@ -968,7 +995,14 @@ function tryCreateGang(ns: NS, player: Player, canCreateGang: boolean): void {
 function assignAction(ns: NS, context: Context, action: PlayerAction): boolean {
     const current = ns.singularity.getCurrentWork() as unknown as Work | null;
 
-    if (action.kind === "BACKDOOR") return runBackdoor(ns, action.hostname);
+    // THE FAILURE REASON REACHES THE CALLER'S LINE, rather than being flattened to `false`.
+    // `tick` reports "could not start …" from this return, and what it appends now names the
+    // cause — see `BackdoorFailure` for the two that exist and why they differ.
+    if (action.kind === "BACKDOOR") {
+        const result = runBackdoor(ns, action.hostname);
+        backdoorFailure = result.reason;
+        return result.started;
+    }
 
     // A CLASS THE PLAYER IS ALREADY TAKING IS LEFT ALONE.
     //
@@ -1473,19 +1507,81 @@ function findBackdoor(ns: NS, player: Player): string | null {
  * silent failure exactly when the layout differs. It became a real one when this
  * feature moved a directory deeper, which is what exposed it.
  */
-const BACKDOOR_WORKER = "backdoor.ts";
+export const BACKDOOR_WORKER = "backdoor.ts";
 
 /**
  * Installs a backdoor by launching the worker, which walks the server path and
  * connects to each hop. Only one runs at a time: a second would fight the first
  * for the player's current server.
  */
-function runBackdoor(ns: NS, host: string): boolean {
-    const worker = findScriptOnHome(ns, BACKDOOR_WORKER);
-    if (worker === null) return false;
+/**
+ * Why a backdoor could not be started, or null when it was.
+ *
+ * TWO FAILURES, TWO RESPONSES, and a bare boolean could not tell them apart. Measured live
+ * in `runs/2026-11-03T21.39.26.280Z--18`: home stood at 8191.85 of 8192 GB for 127 of 139
+ * frames, `ns.run` returned 0, and the run reported "could not start backdoor CSEC" for 56
+ * seconds before succeeding on its own. The line was TRUE and useless — nothing in it said
+ * whether to wait for RAM or go looking for a missing script.
+ *
+ *   missing-worker  file sync has not pushed `backdoor.ts`. Wait for a sync, or check that
+ *                   the script is on home at all.
+ *   no-ram          the game refused the threads. Wait; `home.ts` buys RAM and the worker
+ *                   fits as soon as there is room. Nothing is wrong with the code.
+ */
+export type BackdoorFailure = "missing-worker" | "no-ram";
 
-    if (ns.scriptRunning(worker, "home")) return true;
-    return ns.run(worker, 1, host) > 0;
+/** What happened when a backdoor was launched. */
+export interface BackdoorResult {
+    /** True when the worker is under way — including when it was already running. */
+    readonly started: boolean;
+    /** Why it is not, or null when `started`. */
+    readonly reason: BackdoorFailure | null;
+    /** A phrase for a status line, or an empty string when it started. */
+    describe(): string;
+}
+
+/**
+ * How each failure reads on the status line.
+ *
+ * A TABLE rather than a switch inside `describe`, because the status line and the result's
+ * own description are two readers of the same fact and must not word it differently — the
+ * whole point of the change is that the cause is unambiguous.
+ */
+const BACKDOOR_FAILURE_TEXT: Readonly<Record<BackdoorFailure, string>> = {
+    // Worded to slot into `could not start backdoor CSEC (…)` without nesting brackets of
+    // its own — the first version read `(no RAM for the worker (home is full))`.
+    "missing-worker": `${BACKDOOR_WORKER} not on home — sync it`,
+    "no-ram": "no RAM, home is full",
+};
+
+/** A result, with its description derived rather than passed in three places. */
+function backdoorResult(started: boolean, reason: BackdoorFailure | null): BackdoorResult {
+    return {
+        started,
+        reason,
+        describe: () => (reason === null ? "" : BACKDOOR_FAILURE_TEXT[reason]),
+    };
+}
+
+/**
+ * Launch the worker that installs a backdoor on `host`.
+ *
+ * IDEMPOTENT, because the caller runs every tick: a worker that is already walking the route
+ * counts as started and no second one is launched. Two workers would fight for the player's
+ * current server, which is the one thing a route walk cannot tolerate.
+ */
+export function runBackdoor(ns: NS, host: string): BackdoorResult {
+    const worker = findScriptOnHome(ns, BACKDOOR_WORKER);
+    if (worker === null) return backdoorResult(false, "missing-worker");
+
+    if (ns.scriptRunning(worker, "home")) return backdoorResult(true, null);
+
+    // `ns.run` returns the thread count it started, or 0 when it could not. Zero here is
+    // almost always RAM on a young run, which is why it gets its own reason rather than
+    // being folded into "failed".
+    return ns.run(worker, 1, host) > 0
+        ? backdoorResult(true, null)
+        : backdoorResult(false, "no-ram");
 }
 
 function bestCashCrime(ns: NS): CrimeType {
