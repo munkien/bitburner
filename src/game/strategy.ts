@@ -62,6 +62,19 @@ export interface GangState {
     members: number;
     recruiting: boolean;
     mode: string;
+    /**
+     * The gang's total power, as the game reports it.
+     *
+     * PUBLISHED BECAUSE ITS ABSENCE COST A SESSION. Power is the stat that decides whether
+     * the gang can take territory, and it appears nowhere else on the wire — so "the gang
+     * has stopped growing stronger" was unverifiable from a recording and had to be
+     * reconstructed from a MODE log line that happens to print it.
+     */
+    power: number;
+    /** Share of the map the gang holds, which is what power is FOR. */
+    territory: number;
+    /** How many rival gangs remain. Zero means all the ground is already taken. */
+    enemies: number;
     wanted: GangWantedState;
 }
 

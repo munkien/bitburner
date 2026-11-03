@@ -428,6 +428,32 @@ export function decideMode(
     // AND AN UNREACHABLE FLOOR IS NOT A FLOOR. See `floorIsReachable`: a gang pinned to money
     // for a figure thirteen thousand times its net worth never earns its way out, so the rule
     // that was meant to trade respect for income trades it for nothing, permanently.
+    // POWER BEFORE MONEY, when the gang holds ground it cannot take.
+    //
+    // ABOVE BOTH MONEY GATES, and that placement is the fix. This branch used to sit below
+    // them, which made it unreachable for the whole early and middle game: a run below
+    // `moneyFloor` — and below `moneyFloor * MONEY_PANIC_FRACTION` more so — was told to
+    // earn money on every tick and never trained.
+    //
+    // Measured in `runs/2026-11-03T21.07.59.680Z--15`: power flat at 29.93K -> 29.98K across
+    // ten minutes, twelve members all on `Human Trafficking` / `Traffick Illegal Arms`, and
+    // not one `Territory Warfare` assignment in the entire session. The gang held 14.3% of
+    // the map against four rivals, with net worth around 3b against a 25b floor — so both
+    // gates fired, and the branch below them never ran.
+    //
+    // The money gates exist so a poor gang does not chase respect it cannot use. A gang
+    // weaker than its rivals has a POWER problem instead, and money cannot fix it: the money
+    // is capped by the territory it cannot take. `WARFARE_PREP` is the only mode that trains
+    // past the ordinary targets, so it is the only mode that closes that gap.
+    //
+    // NOT A LICENCE TO IGNORE INCOME. Prep bounds itself twice — `prepTrainerFraction` and
+    // `prepWarfareFraction` — so the remaining members work economically and the gang keeps
+    // earning while it trains. `enemyCount > 0` guards it, because territory against nobody
+    // is already all held.
+    if (!isHacking && g.territory < c.territoryEnableBelow && enemies.enemyCount > 0) {
+        return { mode: "WARFARE_PREP", reason: "weaker-than-enemy" };
+    }
+
     if (!c.recruitingPhase && floorIsReachable(c.moneyFloor, netWorth) && netWorth < c.moneyFloor * MONEY_PANIC_FRACTION) {
         return { mode: "MONEY", reason: "below-money-floor" };
     }
@@ -478,13 +504,8 @@ export function decideMode(
     // A fight worth starting keeps the gang on territory work; `decideWarfare`
     // turns the warfare flag on for the same inputs.
     //
-    // WINNABLE territory was already returned above, before the money gate, so what
-    // reaches here is ground worth having that the gang cannot yet take. That is a
-    // power problem, and `WARFARE_PREP` is the mode that builds power — money earned
-    // here is what buys the equipment that closes the gap.
-    if (!isHacking && g.territory < c.territoryEnableBelow && enemies.enemyCount > 0) {
-        return { mode: "WARFARE_PREP", reason: "weaker-than-enemy" };
-    }
+    // The `WARFARE_PREP` case now runs ABOVE both money gates — see the note there for why
+    // it could never be reached from here.
 
     if (!isHacking && g.territoryWarfareEngaged && g.territory < c.territoryDisableAbove) {
         return { mode: "TERRITORY", reason: "engaged" };

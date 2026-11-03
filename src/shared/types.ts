@@ -176,6 +176,19 @@ export interface GangState {
     readonly recruiting: boolean;
     /** The mode the run chose for the gang this tick. */
     readonly mode: string;
+    /**
+     * The gang's total power.
+     *
+     * The measurement `WARFARE_PREP` exists to raise, and the one that decides whether
+     * territory can be taken. It was missing from the wire entirely, so a gang that stopped
+     * training was invisible: the dashboard showed members, mode and wanted level, all of
+     * which were healthy while power sat flat for hours.
+     */
+    readonly power: number;
+    /** Share of the map the gang holds. */
+    readonly territory: number;
+    /** Rival gangs remaining; zero means there is no ground left to take. */
+    readonly enemies: number;
     readonly wanted: GangWantedState;
 }
 

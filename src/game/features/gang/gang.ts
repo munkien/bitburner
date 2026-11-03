@@ -514,6 +514,13 @@ export function tick(ns: NS, context: Context): void {
         members: members.length,
         recruiting: config.recruitingPhase,
         mode,
+        // POWER AND TERRITORY, the pair that says whether the gang is getting anywhere.
+        // Published because neither appeared on the wire: "the gang stopped growing
+        // stronger" was unverifiable from a recording, and had to be reconstructed from a
+        // MODE log line that happens to print power in its detail column.
+        power: g.power,
+        territory: g.territory,
+        enemies: enemies.enemyCount,
         wanted: {
             level: g.wantedLevel,
             rate: g.wantedLevelGainRate,

@@ -23,14 +23,23 @@ import { test } from "node:test";
 import { GANG_CONFIG_DEFAULT, decideMode, decideWarfare, type EnemyScan } from "./gang-decisions.ts";
 import type { GangGenInfo } from "@ns";
 
-/** A combat gang well under the money floor, with no war in reach. */
+/**
+ * A combat gang well under the money floor, with no war in reach.
+ *
+ * TERRITORY IS ABOVE `territoryEnableBelow` (0.9) DELIBERATELY. This file is about the
+ * MONEY floor and the recruiting override, and a gang short of ground is now sent to
+ * `WARFARE_PREP` before either of those is consulted — so a low-territory fixture would
+ * have tested the power rule by accident. The fixture previously carried `territory: 0.1`,
+ * which was harmless while the prep branch was unreachable and became decisive when it was
+ * moved above the money gates.
+ */
 function gang(over: Partial<GangGenInfo> = {}): GangGenInfo {
     return {
         isHacking: false,
         respect: 10e6,
         respectGainRate: 1,
         respectForNextRecruit: 25e6,
-        territory: 0.1,
+        territory: 0.95,
         territoryClashChance: 0,
         territoryWarfareEngaged: false,
         wantedLevel: 0,
