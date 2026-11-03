@@ -669,7 +669,20 @@ export function tick(ns: NS, context: Context): void {
     // It also does not snapshot the manual choice into module state; the running action is
     // read from the game every tick, so the state cannot go stale.
     if (!idle && !actionExpired && !needsRest && !finishedResting) {
-        if (currentName !== undefined && isFrameworkChoice(ns, currentName)) return;
+        if (currentName !== undefined && isFrameworkChoice(ns, currentName)) {
+            // SAID, NOT SILENT. This is the common case — an action this feature chose is
+            // running and there is no reason to interrupt it — and it used to return with
+            // `reason` left blank, which `publishStatus` renders as "starting".
+            //
+            // That is the worst possible label for a division that is working normally. It
+            // is the same string a wedged feature shows, so a healthy run and a deadlock
+            // read identically on the dashboard and in every recording. Measured in
+            // `runs/2026-11-03T21.24.46.416Z--16`: 45 of 45 frames reported "starting"
+            // while hacking climbed 912 -> 926 and money 7.2b -> 10.8b, and the run was
+            // diagnosed as stalled on that basis before the experience figures were read.
+            reason = `holding ${currentName} (${current.type})`;
+            return;
+        }
 
         // Not what we would pick. Log the intention once, then wait for a boundary.
         if (lastReconsiderReported !== currentName) {

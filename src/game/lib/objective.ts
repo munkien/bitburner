@@ -1392,3 +1392,67 @@ function keepWorking(
     head.splice(position, 1, first!);
     return head;
 }
+
+/**
+ * How the ranking is currently deciding, so a degenerate ordering is visible.
+ *
+ * WHY THIS EXISTS. `rankByTime` orders by estimated time and falls back to `progress` for
+ * goals it cannot time. That fallback is correct, but when it applies to EVERY goal the
+ * ranking is no longer "soonest first" — it is the raw progress ratio, which compares
+ * percentages of goals with different targets and units. The function's own doc comment
+ * records that this is the comparison the time ranking was introduced to replace.
+ *
+ * Measured in `runs/2026-11-03T21.24.46.416Z--16`: all ten goals in the queue reported
+ * `estimateSeconds: null`, because `estimateSeconds` returns null unless a goal's every
+ * requirement is a training stat — and territory, reputation, money and karma have no rate.
+ * The ranking had therefore been `progress`-ordered for the entire session while reading as
+ * if it were time-ordered, and nothing anywhere said so.
+ *
+ * NOT A FIX. Teaching the ranker to time a territory campaign needs a model of how fast a
+ * gang takes ground, which is a real piece of work and not one to invent from nothing. This
+ * reports the gap so a reader knows which ordering they are looking at, and so the next
+ * person does not have to derive it from a queue dump.
+ */
+export type RankingMode =
+    /** At least two goals had a time, so the comparison is genuinely soonest-first. */
+    | "time"
+    /** Exactly one goal was timeable. It wins by default; the rest fall back. */
+    | "almost"
+    /** Nothing was timeable, so this is `progress` ordering and not a time ranking at all. */
+    | "progress";
+
+/** Which of the three orderings `rankByTime` is about to use. */
+export function rankingMode(goals: readonly Goal[], rate: RateLookup): RankingMode {
+    let timed = 0;
+    for (const goal of goals) {
+        const seconds = estimateSeconds(goal, rate);
+        if (seconds !== null && Number.isFinite(seconds)) timed++;
+    }
+    if (timed >= 2) return "time";
+    return timed === 1 ? "almost" : "progress";
+}
+
+/** A sentence naming the ordering, for a status line or a log entry. */
+export function describeRanking(goals: readonly Goal[], rate: RateLookup): string {
+    const mode = rankingMode(goals, rate);
+    const total = goals.length;
+    switch (mode) {
+        case "time":
+            return `ranked by time (${total} goals, ${countTimed(goals, rate)} timed)`;
+        case "almost":
+            return `ranked by time, but only ${countTimed(goals, rate)} of ${total} goals could be timed`;
+        case "progress":
+            // Named plainly, because this is the state that reads as correct and is not.
+            return `ranked by PROGRESS only: none of ${total} goals has a measurable rate`;
+    }
+}
+
+/** How many goals could be timed. Small helper so the two messages cannot disagree. */
+function countTimed(goals: readonly Goal[], rate: RateLookup): number {
+    let n = 0;
+    for (const goal of goals) {
+        const seconds = estimateSeconds(goal, rate);
+        if (seconds !== null && Number.isFinite(seconds)) n++;
+    }
+    return n;
+}

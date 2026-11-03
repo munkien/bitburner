@@ -12,7 +12,7 @@ import {
 } from "./lib/context.ts";
 import { createFeatureRuntime, type FeatureStatus } from "./lib/feature-runtime.ts";
 import { announce, readStatuses } from "./lib/log.ts";
-import { currentGoal, preferGoal, type Goal, type SubGoalKey } from "./lib/objective.ts";
+import { currentGoal, describeRanking, preferGoal, type Goal, type SubGoalKey } from "./lib/objective.ts";
 import { measuredRateFor } from "./features/player/activity.ts";
 import { featureParticipation, featuresInOrder } from "./lib/registry.ts";
 import { stallClock } from "./features/retire/retire.ts";
@@ -647,6 +647,11 @@ export function describeGoals(ns: NS, context: Context): string[] {
     if (context.goals.length === 0) return ["none (every faction joined)"];
 
     const lines = [`${describeGoal(ns, context.goals[0]!)}`];
+    // HOW THE ORDER WAS CHOSEN, said out loud. A queue where nothing could be timed is
+    // ordered by `progress`, which compares percentages of goals with different targets and
+    // units — the comparison the time ranking exists to replace. It reads exactly like a time
+    // ranking unless something says otherwise, and nothing did for an entire session.
+    lines.push(`  (${describeRanking(context.goals, measuredRateFor)})`);
     for (const goal of context.goals.slice(1)) {
         // Queued goals are indented and lose the outstanding breakdown: the detail belongs
         // to the goal being worked on, and repeating it for every goal would crowd out the

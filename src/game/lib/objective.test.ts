@@ -29,7 +29,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { FACTION_REQUIREMENTS, MEGACORP_REQUIREMENTS, deriveGoals, rankByTime, standingOf, type Goal, type PlayerStanding } from "./objective.ts";
+import { FACTION_REQUIREMENTS, MEGACORP_REQUIREMENTS, deriveGoals, describeRanking, rankByTime, rankingMode, standingOf, type Goal, type PlayerStanding } from "./objective.ts";
 import type { CompanyName, Player } from "@ns";
 
 /* ─── a standing, built from the fields the tests care about ─── */
@@ -360,4 +360,71 @@ test("a real handover between timed goals still happens", () => {
     // ranking puts NiteSec first, and holding BitRunners must not change that.
     const ordered = rankByTime(goals, () => 1, { working: bitRunners });
     assert.equal(ordered[0]?.goal, "join NiteSec", "the hold vetoed a handover between two timed goals");
+});
+
+/* ─── WHICH ORDERING IS ACTUALLY IN FORCE ─── */
+
+/** A goal with one sub-goal, the shape `deriveGoals` produces. */
+function oneGoal(name: string, progress: number, key: string, current: number, target: number): Goal {
+    return {
+        goal: name,
+        kind: "faction" as const,
+        faction: name as never,
+        progress,
+        // `forGoal` IS REQUIRED and the tests passed without it — the suite runs through a
+        // transform that strips types without checking them, so only `tsc` caught this.
+        subGoals: [{ key: key as never, forGoal: name as never, current, target, done: false, contributors: [] }],
+        blockedBy: [],
+        contributors: [],
+        estimateSeconds: null,
+    };
+}
+
+test("a queue with no timable goal is reported as progress-ordered", () => {
+    // THE STATE THE LIVE RUN WAS IN. `gangTerritory`, `rep`, `money` and `karma` have no
+    // rate, so a goal built from them returns a null estimate — and when every goal does,
+    // the ranking is the raw progress ratio, not a time ranking. Measured in
+    // `runs/2026-11-03T21.24.46.416Z--16`: all ten goals untimed, for the whole session.
+    const goals = [
+        oneGoal("take the map", 0.64, "gangTerritory", 0.14, 0.5),
+        oneGoal("earn The Syndicate reputation", 0.38, "rep", 100, 1000),
+    ];
+
+    assert.equal(rankingMode(goals, () => null), "progress");
+    assert.match(describeRanking(goals, () => null), /PROGRESS only/);
+});
+
+test("two timable goals is a real time ranking", () => {
+    // The control: the fallback must not be reported when it is not happening, or the line
+    // becomes noise nobody reads.
+    const goals = [
+        oneGoal("a", 0.5, "hacking", 100, 200),
+        oneGoal("b", 0.5, "combat", 100, 200),
+    ];
+    const rate = () => 1;
+
+    assert.equal(rankingMode(goals, rate), "time");
+    assert.match(describeRanking(goals, rate), /ranked by time/);
+});
+
+test("one timable goal is reported as almost", () => {
+    // The middle state, and the one most likely to be misread as a full time ranking: the
+    // single timed goal wins by default, and everything after it is progress-ordered.
+    const goals = [
+        oneGoal("a", 0.5, "hacking", 100, 200),
+        oneGoal("take the map", 0.64, "gangTerritory", 0.14, 0.5),
+    ];
+    const rate = (k: string) => (k === "hacking" ? 1 : null);
+
+    assert.equal(rankingMode(goals, rate), "almost");
+    assert.match(describeRanking(goals, rate), /only 1 of 2/);
+});
+
+test("an infinite estimate does not count as timed", () => {
+    // `estimateSeconds` returns `Infinity` for a measurable-but-not-moving requirement, and
+    // `rankByTime` treats that as untimed. The two must agree, or the reported ordering
+    // would describe a ranking the sort is not performing.
+    const goals = [oneGoal("a", 0.5, "hacking", 100, 200)];
+    // A rate of zero means "measured, not rising" — the ETA is Infinity.
+    assert.equal(rankingMode(goals, () => 0), "progress");
 });
