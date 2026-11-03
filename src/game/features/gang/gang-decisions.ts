@@ -1555,3 +1555,37 @@ export function computeTrainerCap(
     const fractionCap = Math.ceil(memberCount * c.trainMaxFraction);
     return Math.max(0, Math.min(fractionCap, memberCount - wantedHoldCrew));
 }
+
+/**
+ * Which members make up the wanted-cleaning crew, decided from the roster.
+ *
+ * A SET OF NAMES, NOT A COUNT. `tick` used a running counter checked in roster order, which
+ * answers "how many" and lets the loop order decide "which" — so the member who fills the
+ * last slot is the first one freed next pass, and the crew moves every tick. Measured in
+ * `runs/2026-11-03T21.24.46.416Z--16`, on a four-second cycle:
+ *
+ *   21:27:37  Goon-11  Vigilante Justice   wanted floor
+ *   21:27:41  Goon-11  Territory Warfare   prep: power
+ *   21:28:04  Goon-11  Vigilante Justice   wanted floor
+ *
+ * Thirty-seven flips across two members, each one restarting the task.
+ *
+ * THE SAME SHAPE AS `economicModeByMember`, for the same reason: a member's place in the
+ * gang should be a property of the gang, not of how many members were diverted ahead of them
+ * in a loop. Decided once, from the roster, it cannot move because somebody else was
+ * assigned first.
+ *
+ * STRONGEST FIRST, matching `memberPower` ordering. Cleanup is worth the strongest members —
+ * the size is derived from the BEST cleaner's rate, so filling it from the tail would size
+ * the crew against members who cannot deliver it. Taking a prefix also makes a shrinking
+ * crew a suffix of the larger one, so a size change churns only the members it adds or drops
+ * rather than re-picking the whole set.
+ */
+export function wantedCrewFor(
+    /** The non-trainers, in the order they will be assigned: strongest first. */
+    nonTrainers: readonly { readonly name: string }[],
+    size: number,
+): Set<string> {
+    if (!Number.isFinite(size) || size <= 0) return new Set();
+    return new Set(nonTrainers.slice(0, Math.floor(size)).map(m => m.name));
+}

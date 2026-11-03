@@ -27,6 +27,7 @@ import {
     territoryLockHeld,
     trainingTask,
     wantedRise,
+    wantedCrewFor,
     wantedWorkersFor,
     type EnemyScan,
     type EquipmentInfo,
@@ -603,7 +604,32 @@ export function tick(ns: NS, context: Context): void {
     const nonTrainers = sorted.filter(m => !activeTrainers.has(m.name));
     const economicMode = economicModeByMember(mode, nonTrainers, config);
 
-    let wantedWorkers = 0;
+    // WHO cleans, decided once from the roster rather than by a counter inside the loop.
+    //
+    // The counter answered "how many" and let the loop order answer "which", so the member
+    // who filled the last slot was the first freed next pass and the crew moved every tick.
+    // Measured in `runs/2026-11-03T21.24.46.416Z--16`: Goon-11 and Goon-9 alternated between
+    // cleanup and prep 37 times on a four-second cycle, restarting the task each time.
+    // `wantedCrewFor` explains the shape; it is the same fix `economicModeByMember` already
+    // applies to the respect/money split.
+    const wantedCrew = wantedCrewFor(nonTrainers, wantedHoldCrew);
+
+    // The mode's own crew, when it wants MORE than the floor. SIZED ONCE here for the same
+    // reason: `wantedWorkersFor` is a function of the gang, not of the loop.
+    //
+    // Derived from the same roster and the same prefix rule as the floor, so the two sets
+    // nest: the mode crew is a superset of the floor crew, and a member moves between them
+    // only when the SIZE changes rather than whenever a counter happens to reach them.
+    const wantedFullCrew = mode === "WANTED"
+        ? wantedCrewFor(nonTrainers, Math.max(
+            wantedHoldCrew,
+            wantedWorkersFor(g, wantedPressure, members.length, config, wantedEngaged),
+        ))
+        : wantedCrew;
+
+    // NO `wantedWorkers` COUNTER. Both wanted branches are MEMBERSHIP tests now, so a
+    // running count has nothing left to gate — and keeping one would invite it back into a
+    // condition, which is exactly the churn `wantedCrewFor` exists to remove.
     let territoryWorkers = 0;
     let prepWarfareAssigned = 0;
 
@@ -706,15 +732,24 @@ export function tick(ns: NS, context: Context): void {
         // and members are taken in assignment order until the level is held. What the mode
         // decides is now only whether cleanup gets MORE than the floor, which is what
         // `wantedWorkersFor` sizes. The floor is a minimum, not a competing claim.
-        if (wantedHoldCrew > 0 && wantedWorkers < wantedHoldCrew) {
+        // MEMBERSHIP, NOT A COUNT. `wantedCrew` names the same members every pass, so a
+        // member on cleanup stays there until the SIZE changes or they leave the roster.
+        if (wantedCrew.has(m.name)) {
             assign(m.name, specials.wanted, wantedHoldReason);
-            wantedWorkers++;
             continue;
         }
 
-        if (mode === "WANTED" && wantedWorkers < wantedWorkersFor(g, wantedPressure, members.length, config, wantedEngaged)) {
+        // THE MODE'S ADDITIONAL CREW, above the floor — and it is a MEMBERSHIP test for the
+        // same reason the floor above is.
+        //
+        // This was the second counter, and leaving it as one would have left half the defect
+        // in place: the floor has already taken its members, so the member who fills the last
+        // slot here is again whichever the loop reached at that moment.
+        // In the recording Goon-9 alternated `Territory Warfare (prep: power)` and
+        // `Terrorism (RESPECT)` on the same four-second cycle as Goon-11's wanted flip —
+        // one counter for the floor and one for the mode, both churning the same roster.
+        if (mode === "WANTED" && wantedFullCrew.has(m.name)) {
             assign(m.name, specials.wanted, "wanted cleanup");
-            wantedWorkers++;
             continue;
         }
 
