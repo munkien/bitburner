@@ -222,6 +222,52 @@ export function reset(): void {
  * paying two commissions to answer a question the capability layer already
  * knows (see lib/caps.ts).
  */
+/**
+ * How much cash the market may put into positions.
+ *
+ * TWO RESERVES, APPLIED IN ORDER, because they answer different questions and both still
+ * stand:
+ *
+ *   `reservedCash`        cash another feature has spoken for — the framework's reserve. It
+ *                         is not the market's, at any price.
+ *   `netWorth * pct`      the market's OWN solvency margin, so positions are not all-in.
+ *
+ * THE BUG THIS FIXES. The second was applied and the first was not: `stocks.ts` read
+ * `player.money` and subtracted only `RESERVE_CASH_PCT` of net worth, so it spent money an
+ * augmentation was being saved for. Measured in `runs/2026-11-03T21.39.26.280Z--18`, three
+ * breaches in five minutes — `reserve 45.8m, money 62.6m -> 9.1m` and so on — with a worst
+ * case of 152.9m short against a 218.5m reserve.
+ *
+ * This is the same defect the augment buyer had, in a different feature: a spender comparing
+ * a balance instead of a surplus. Both were invisible until a reserve existed to breach.
+ *
+ * Pure, and the parameters come in rather than being read, so the arithmetic is assertable
+ * without standing up a market.
+ */
+export function deployableFor(p: {
+    /** Home cash, the figure `player.money` reports. */
+    readonly cash: number;
+    /** Cash the framework has reserved — `reserves.cash + reserves.stockAccessCash`. */
+    readonly reservedCash: number;
+    /** Cash plus holdings, what the market's own margin is a fraction of. */
+    readonly netWorth: number;
+    /** The market's solvency margin, `CONFIG.RESERVE_CASH_PCT`. */
+    readonly reserveCashPct: number;
+    /** The tier's share of the remainder it is willing to have deployed. */
+    readonly deployTargetPct: number;
+}): number {
+    // THE FRAMEWORK'S RESERVE FIRST, and clamped at zero: a reserve larger than the balance
+    // means the market has nothing, not a negative amount. The clamp matters — a negative
+    // here becomes a huge unsigned figure once it reaches the order sizing.
+    const free = Math.max(0, p.cash - p.reservedCash);
+
+    // The market's own margin, taken from net worth as it always was. It is a different
+    // quantity on purpose: it is about total exposure, not about which cash is unspoken for.
+    const own = p.netWorth * p.reserveCashPct;
+
+    return Math.max(0, (free - own) * p.deployTargetPct);
+}
+
 export function tick(ns: NS, context: Context): void {
     log ??= new ChangeOnce(ns, "STOCK");
     log.updateNs(ns);
@@ -269,7 +315,10 @@ export function tick(ns: NS, context: Context): void {
         holdingsValue -= s.shortShares * s.ask;
     }
     const netWorth = cash + holdingsValue;
-    const reserveCash = netWorth * CONFIG.RESERVE_CASH_PCT;
+    // `reserveCash` is GONE from here and now lives inside `deployableFor`, where both
+    // reserves are applied together. It was `netWorth * RESERVE_CASH_PCT` — the market's own
+    // solvency margin, not the framework's reserve — and keeping it as a local invited exactly
+    // the mistake it made: spending cash another feature had already spoken for.
 
     // ----- Profile Determination -----
     // The tier sets `minEdge` and `riskAdjPower`; having 4S then raises the deployment target
@@ -425,7 +474,17 @@ export function tick(ns: NS, context: Context): void {
         // as high as a strong long), so one descending sort serves both.
         candidates.sort((a, b) => has4S ? b.rank - a.rank : b.riskAdj - a.riskAdj);
 
-        const deployable = Math.max(0, (cash - reserveCash) * profile.deployTargetPct);
+        // THE FRAMEWORK'S RESERVE IS SUBTRACTED FIRST, then the market's own margin, then the
+        // profile's deployment fraction. See `deployableFor` — this line used to subtract only
+        // `reserveCash`, which is the market's solvency margin and knows nothing about cash
+        // another feature has spoken for.
+        const deployable = deployableFor({
+            cash,
+            reservedCash: context.reserves.cash + context.reserves.stockAccessCash,
+            netWorth,
+            reserveCashPct: CONFIG.RESERVE_CASH_PCT,
+            deployTargetPct: profile.deployTargetPct,
+        });
         let remaining = deployable;
         // No single name may hold more than this slice, however strong its signal.
         //
