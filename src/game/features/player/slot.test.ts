@@ -66,15 +66,31 @@ function fakeNs(
 
 /* ─── the flag, as the two callers read it ─── */
 
-test("with the augment, the slot is never Bladeburner's alone", () => {
-    // `slotsShared: false` means the augment is owned, and every question about who owns
-    // the slot then answers "nobody is excluded".
+test("with the augment, the division NEVER yields", () => {
+    // `slotsShared: false` means the augment is owned, and every question about who owns the
+    // slot then answers "nobody is excluded" — including the yield.
+    //
+    // THE ASSERTION HERE USED TO BE THE OPPOSITE. `bladeburnerYieldsForTraining(ns, false,
+    // true)` was asserted `true`, on the reasoning that it is "the inverse" of `keepsSlot`.
+    // That treats `false` from `keepsSlot` as one thing when it is two:
+    //
+    //   slotsShared is false    nobody is excluded, so there is nothing to yield TO
+    //   someone else holds it   the division should hand the slot back
+    //
+    // Inverting the predicate collapses those, so a run with the Simulacrum was told to yield
+    // on every tick. Measured in `runs/2026-11-04T10.51.23.925Z--37`, where
+    // `capabilities.bladesSimulacrum` was true and the division still reported
+    // `yielded to training` without ever starting an action.
     const ns = fakeNs(CONTRACT);
 
     assert.equal(bladeburnerKeepsSlot(ns, false, true), false, "training was told to stand down");
     assert.equal(bladeburnerKeepsSlot(ns, false, false), false);
-    // The inverse, because the two features read opposite halves of the same answer.
-    assert.equal(bladeburnerYieldsForTraining(ns, false, true), true);
+    assert.equal(
+        bladeburnerYieldsForTraining(ns, false, true),
+        false,
+        "with the slot unshared there is nothing to yield, so yielding stops the division working",
+    );
+    assert.equal(bladeburnerYieldsForTraining(ns, false, false), false);
 });
 
 test("without the augment, a chain still keeps the slot", () => {

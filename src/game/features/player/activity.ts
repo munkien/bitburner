@@ -283,6 +283,20 @@ export function bladeburnerYieldsForTraining(
     slotsShared: boolean,
     trainingWanted: boolean,
 ): boolean {
+    // NOTHING TO YIELD WHEN THE SLOT IS UNSHARED. With The Blade's Simulacrum a Bladeburner
+    // action does not occupy the activity slot at all, so there is no contention and the
+    // division must carry on whatever training wants.
+    //
+    // THIS WAS `!bladeburnerKeepsSlot(...)`, which is what the "exact inverses" comment
+    // invited and is wrong. `keepsSlot` returns false for TWO reasons — the slot is unshared,
+    // or somebody else holds it — and only the second is a reason to yield. Inverting
+    // collapsed them, so a run owning the augment yielded on every tick and never started an
+    // action. Measured in `runs/2026-11-04T10.51.23.925Z--37`: `capabilities.bladesSimulacrum`
+    // true, `bladeburner: yielded to training`, division idle for the whole session.
+    if (!slotsShared) return false;
+
+    // Shared: yield exactly when the division is not keeping it. The two are true opposites
+    // on this branch, which is what the original comment claimed of them everywhere.
     return !bladeburnerKeepsSlot(ns, slotsShared, trainingWanted);
 }
 
