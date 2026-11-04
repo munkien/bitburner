@@ -1379,26 +1379,81 @@ export function ensureCompanyJob(ns: NS, company: CompanyName, now: number): Job
  * field is a rejected call, and a rejected call every minute for the life of the run is
  * worse than doing nothing.
  */
-function FIELD_OF_JOB(job: JobName): (typeof COMPANY_FIELDS)[number] | null {
-    const name = String(job).toLowerCase();
-    if (name.includes("software")) return name.includes("consultant") ? "Software Consultant" : "Software";
-    if (name.includes("network")) return "Network Engineer";
-    if (name.includes("security engineer")) return "Security Engineer";
-    if (name.includes("security")) return "Security";
-    if (name.includes("business")) return name.includes("consultant") ? "Business Consultant" : "Business";
-    if (name.includes("agent")) return "Agent";
-    // `IT` LAST, and matched on a WORD BOUNDARY rather than as a substring.
-    //
-    // `includes("it")` is true for "Waiter", "Part-time Waiter", "Fitness Trainer",
-    // "Accountant" and half the game's unrelated positions — so the earlier version
-    // treated a waiter's job as an IT position and applied for a promotion in a field the
-    // player does not hold. A refused call every minute, for the life of the run.
-    //
-    // Every other branch above is checked first, so by here the only positions left are
-    // ones this feature does not promote. The `IT` match is therefore narrow on purpose.
-    if (/\bit\b/.test(name)) return "IT";
-    return null;
+/**
+ * The field a held position belongs to, or null when it is not one this applies for.
+ *
+ * `applyToCompany` takes a FIELD and returns the best position in it, so a promotion has
+ * to name the field the player is already in. The game gives no reverse lookup, so this maps
+ * the position's own name — the positions are the game's fixed strings and each belongs to
+ * exactly one field.
+ *
+ * A TABLE, NOT A SUBSTRING GUESS. The previous version matched on "software", "business" and
+ * so on, which runs out at the senior end of every ladder: "Head of Engineering" and
+ * "Vice President of Technology" contain neither word, so they mapped to NOTHING and the run
+ * applying from them applied nowhere — holding the position for the rest of its life, with no
+ * refused call and no error to show for it. Eight positions were unreachable this way,
+ * including the reported "Chief Technology Officer".
+ *
+ * Enumerating is also the only way to keep "Security Engineer" out of "Security": those are
+ * separate fields, and matching on "security" put the engineer's position in the guard's
+ * ladder.
+ *
+ * Null rather than a guess for a position this does not recognise: applying in the wrong
+ * field is a rejected call, and a rejected call every minute for the life of the run is worse
+ * than doing nothing. A title the game adds later is one this does not promote until it is
+ * added here — which is the safe direction.
+ */
+export function FIELD_OF_JOB(job: JobName): (typeof COMPANY_FIELDS)[number] | null {
+    return JOB_FIELD[String(job)] ?? null;
 }
+
+/**
+ * Every position the game offers, by the field that promotes it.
+ *
+ * TRANSCRIBED FROM THE GAME'S `JobNameEnumType`, and the only place that mapping lives. A
+ * title missing here is a position the run cannot be promoted out of, which is silent, so the
+ * list is worth checking against the enum when the game adds one.
+ */
+const JOB_FIELD: Readonly<Record<string, (typeof COMPANY_FIELDS)[number]>> = {
+    // Software. The senior half — Head of Engineering onward — is what the substring match
+    // could not see.
+    "Software Engineering Intern": "Software",
+    "Junior Software Engineer": "Software",
+    "Senior Software Engineer": "Software",
+    "Lead Software Developer": "Software",
+    "Head of Software": "Software",
+    "Head of Engineering": "Software",
+    "Vice President of Technology": "Software",
+    "Chief Technology Officer": "Software",
+    "Software Consultant": "Software Consultant",
+
+    "IT Intern": "IT",
+    "IT Analyst": "IT",
+    "IT Manager": "IT",
+    "Systems Administrator": "IT",
+
+    "Security Engineer": "Security Engineer",
+
+    "Network Engineer": "Network Engineer",
+    "Network Administrator": "Network Engineer",
+
+    "Security Guard": "Security",
+    "Security Officer": "Security",
+    "Security Supervisor": "Security",
+    "Head of Security": "Security",
+
+    "Business Intern": "Business",
+    "Business Analyst": "Business",
+    "Business Manager": "Business",
+    "Operations Manager": "Business",
+    "Chief Financial Officer": "Business",
+    "Chief Executive Officer": "Business",
+    "Business Consultant": "Business Consultant",
+
+    "Field Agent": "Agent",
+    "Secret Agent": "Agent",
+    "Special Operative": "Agent",
+};
 
 /**
  * Ask for a promotion at the company being worked for, at most once a minute.

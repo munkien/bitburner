@@ -104,10 +104,23 @@ test("every field maps to itself, so a promotion never names the wrong one", () 
         ["IT Intern", "IT"],
         ["Network Engineer", "Network Engineer"],
         ["Security Engineer", "Security Engineer"],
-        ["Security Analyst", "Security"],
+        // A REAL position. This entry used to read "Security Analyst", which the game does
+        // not offer — the old substring match answered "Security" for it anyway, so the test
+        // passed while proving nothing about a position that exists.
+        ["Head of Security", "Security"],
         ["Business Intern", "Business"],
         ["Business Consultant", "Business Consultant"],
-        ["Agent", "Agent"],
+        // The position, not the field's own name. "Agent" alone is not a job the game
+        // offers; the entry passed only because the substring match treated the word as one.
+        ["Field Agent", "Agent"],
+        // The senior half of the software ladder, which eight positions could not reach
+        // before the table replaced the substring match — this is the reported
+        // "never applies for Chief Technology Officer".
+        ["Head of Engineering", "Software"],
+        ["Chief Technology Officer", "Software"],
+        ["Systems Administrator", "IT"],
+        ["Chief Executive Officer", "Business"],
+        ["Special Operative", "Agent"],
     ];
 
     for (const [job, expected] of cases) {
