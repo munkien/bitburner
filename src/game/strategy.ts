@@ -191,6 +191,27 @@ export interface WorkProjection {
 export interface NexusState {
     /** What each feature is doing, or the guard that stopped it, by feature id. */
     statuses?: Record<string, string>;
+    /**
+     * Every capability flag the framework acts on.
+     *
+     * ON THE WIRE BECAUSE THE TERMINAL IS NOT RECORDED. `Capabilities.describe()` prints the
+     * same facts at boot and nothing captures them, so "does this run own The Blade's
+     * Simulacrum" could only be inferred from behaviour — and the division yielding for
+     * training turns on exactly that boolean. Two sessions went into a question this answers
+     * directly.
+     *
+     * Mirrors `CapabilityProbes` in `lib/caps.ts` without importing it: this module is the
+     * transport and takes plain data.
+     */
+    capabilities?: {
+        readonly tor?: boolean;
+        readonly stocks?: boolean;
+        readonly formulasExe?: boolean;
+        readonly gangMember?: boolean;
+        readonly bladeburnerDivision?: boolean;
+        readonly darkscapeNavigator?: boolean;
+        readonly bladesSimulacrum?: boolean;
+    };
     goal?: {
         name: string;
         progress: number;

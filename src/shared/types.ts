@@ -232,7 +232,35 @@ export interface NexusState {
      * deadlock visible rather than something to deduce from frozen numbers.
      */
     statuses?: Record<string, string>;
-    /** The goal being worked on, or null when every faction is joined. */
+    /**
+     * Every capability flag the framework acts on.
+     *
+     * ON THE WIRE BECAUSE THE TERMINAL IS NOT RECORDED. These were only ever printed by
+     * `Capabilities.describe()` at boot, so a question like "does this run own The Blade's
+     * Simulacrum?" — on which the Bladeburner yield depends — could not be answered from a
+     * recording at all, only inferred from downstream behaviour.
+     */
+    capabilities?: {
+        /** TOR router owned. */
+        readonly tor?: boolean;
+        /** WSE account and TIX API, so the market is usable. */
+        readonly stocks?: boolean;
+        /** Formulas.exe on home, which the batcher prefers for exact timings. */
+        readonly formulasExe?: boolean;
+        /** Member of a gang. */
+        readonly gangMember?: boolean;
+        /** In the Bladeburner division. */
+        readonly bladeburnerDivision?: boolean;
+        /** DarkscapeNavigator.exe on home. */
+        readonly darkscapeNavigator?: boolean;
+        /**
+         * The Blade's Simulacrum: Bladeburner actions no longer occupy the activity slot.
+         *
+         * The flag a run's whole activity model turns on, and the one this field was added
+         * for.
+         */
+        readonly bladesSimulacrum?: boolean;
+    };
     goal?: {
         /** The achievement, named for display. */
         name: string;

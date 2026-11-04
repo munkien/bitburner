@@ -1,6 +1,6 @@
 import type { NS } from "@ns";
 
-import { detectCapabilities, type Capabilities } from "./lib/caps.ts";
+import { capabilityFlags, detectCapabilities, type Capabilities } from "./lib/caps.ts";
 import {
     createContextReader,
     createRecent,
@@ -722,6 +722,11 @@ function describeNexus(
         // panel reading "reserved cash 0" while the run was holding back billions.
         // `incomePerSecond` is carried because it is the input both reserve decisions share,
         // so a reader can check the reserve against the rate that produced it.
+        // EVERY CAPABILITY FLAG, because nothing else on the wire says what the run can do.
+        // `describe()` prints them to the Terminal and no recording captures the Terminal, so
+        // "does this run own The Blade's Simulacrum" could only be inferred from downstream
+        // behaviour — which is how two sessions went into a question one boolean answers.
+        capabilities: capabilityFlags(context.capabilities),
         reserves: {
             cash: reserves.cash,
             stockAccessCash: reserves.stockAccessCash,

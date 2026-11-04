@@ -547,3 +547,29 @@ export function unmetRequirement(caps: Capabilities, requires: readonly Capabili
     return null;
 }
 
+
+/**
+ * The capability probes, as a plain object for telemetry.
+ *
+ * WHY THE FLAGS GO ON THE WIRE. `describe()` prints them to the in-game Terminal at boot,
+ * and no recording captures the Terminal. Every question of the form "does this run have X"
+ * therefore had to be answered from downstream behaviour, which is exactly the kind of
+ * inference that goes wrong:
+ *
+ * The division reported `yielded to training` while the player believed The Blade's
+ * Simulacrum was installed. The yield is gated on `capabilities.has("bladesSimulacrum")`, so
+ * the entire disagreement turned on one boolean that nothing could read. Two sessions were
+ * spent reasoning about it from behaviour.
+ *
+ * COPIED RATHER THAN REFERENCED. This object rides on telemetry frames; handing out the live
+ * `probes` object would let a later capability refresh mutate a payload that has already been
+ * sent, so a recording would show a frame claiming a state the game was not in when it was
+ * taken.
+ *
+ * EVERY KEY IS ALWAYS PRESENT, built by spreading the probe object rather than listing fields.
+ * A flag missing from the output reads as `false` to whoever looks it up, which is the
+ * direction that costs a session — "not owned" is indistinguishable from "not reported".
+ */
+export function capabilityFlags(caps: Capabilities): CapabilityProbes {
+    return { ...caps.probes };
+}
