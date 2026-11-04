@@ -1,4 +1,4 @@
-import { NS } from "@ns";
+import type { NS } from "@ns";
 
 /*
  * ============================================================================
@@ -41,6 +41,38 @@ const CONFIG = {
     expandBelowUsedPercent: 80,
     budgetRatio: 0.1,
 };
+
+/**
+ * The next unused name in the fleet, given the names currently in use.
+ *
+ * WALKS TO A FREE NUMBER rather than counting the fleet. `purchase` used
+ * `${prefix}${names.length}`, which is only correct while the fleet is contiguous and was
+ * never re-numbered — and a removed server leaves a hole, so the count points at a name that
+ * is already taken.
+ *
+ * THE GAME RENAMES ON COLLISION, silently and with a suffix of its own choosing, so a counted
+ * name is not the name the run ends up with. Measured in
+ * `runs/2026-11-04T09.37.53.447Z--33`: `getServerMaxRam: Invalid host: 'cloud-0'` killed both
+ * hacking and share at session start, two seconds before the fleet was bought — the list and
+ * the purchases had drifted apart and two features read the gap.
+ *
+ * Names that do not match the prefix, or whose suffix is not a number, are ignored: they are
+ * not ours to count, and a `NaN` from parsing one would produce a name the game then renames.
+ */
+export function nextServerName(inUse: readonly string[], prefix: string): string {
+    const taken = new Set<number>();
+    for (const name of inUse) {
+        if (!name.startsWith(prefix)) continue;
+        const suffix = name.slice(prefix.length);
+        // A digit-only suffix, so `cloud-abc` and `cloud-1x` are skipped rather than parsed.
+        if (!/^\d+$/.test(suffix)) continue;
+        taken.add(Number(suffix));
+    }
+
+    let n = 0;
+    while (taken.has(n)) n++;
+    return `${prefix}${n}`;
+}
 
 /* ───────────────────────── Caches ───────────────────────── */
 
@@ -168,7 +200,10 @@ function purchase(
             }
             if (targetRam === 0) break;
 
-            const host = ns.cloud.purchaseServer(`${prefix}${names.length}`, targetRam);
+            // A NAME CHOSEN TO BE FREE, not counted off the list. See `nextServerName` — a
+            // removed server leaves a hole, and the game renames silently on a collision, so
+            // the framework used to end up with a name it had not asked for.
+            const host = ns.cloud.purchaseServer(nextServerName(names, prefix), targetRam);
             if (!host) break;
 
             spent += serverCost(ns, targetRam);
