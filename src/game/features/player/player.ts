@@ -167,11 +167,25 @@ function factionEntries<T>(table: Readonly<Partial<Record<FactionName, T>>>): [F
 
 const CITY_FACTIONS = new Set<FactionName>(["Sector-12", "Aevum", "Volhaven", "Chongqing", "New Tokyo", "Ishima"]);
 
-const BACKDOOR_FACTIONS: Record<string, FactionName> = {
+/**
+ * The factions joined by installing a backdoor, and the server each needs.
+ *
+ * SILENT WHEN AN ENTRY IS MISSING. `findBackdoor` walks this table and stops at the first
+ * server that still needs one, so a faction absent here is never attempted — no log line, no
+ * error, nothing to distinguish it from a faction that needs no backdoor at all. Reported as
+ * "fulcrumassets is not being backdoored when possible": it was simply not in the list.
+ *
+ * Exported for `backdoor-factions.test.ts`, which pins the set. The game does not publish this
+ * mapping, so the table is the only record of it.
+ */
+export const BACKDOOR_FACTIONS: Record<string, FactionName> = {
     CSEC: "CyberSec",
     "avmnite-02h": "NiteSec",
     "I.I.I.I": "The Black Hand",
     run4theh111z: "BitRunners",
+    // Fulcrum Secret Technologies. Absent until it was reported, so the faction could never be
+    // joined — the run could not see that it wanted a backdoor.
+    fulcrumassets: "Fulcrum Secret Technologies",
 };
 
 /**
