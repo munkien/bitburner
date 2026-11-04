@@ -734,6 +734,27 @@ export function chooseGear(
 export const WANTED_LEVEL_FLOOR = 1;
 
 /**
+ * The smallest wanted-level rise worth sending a crew for, in levels per cycle.
+ *
+ * A POSITIVE RISE WAS TREATED AS A TREND, and a rise of 0.002 per cycle — the gang simply
+ * existing — sent a member to the wanted task. One cleaner removes roughly 11 per cycle, so
+ * the crew drove the level from 1.02 to the 1.00 floor and was released on the next tick.
+ * Measured in `runs/2026-11-04T09.48.28.372Z--34`: forty-three mode flips in eighty-eight
+ * frames, `RESPECT:respect-phase` against `WANTED:wanted-cleanup`, with every other input
+ * identical between the two.
+ *
+ * THE COST IS THE SWITCH, NOT THE WORK. Each flip takes a member off respect work and puts
+ * them back again, and neither task runs long enough to pay for the change.
+ *
+ * 0.1 rather than a figure derived from the cleaners' rate: the crew's throughput is read
+ * from the game and varies by two orders of magnitude across a run, so a multiple of it would
+ * move under the decision that reads it. A fixed tenth of a level per cycle is above the
+ * background chatter on every recording I have and two orders below one cleaner's output, so
+ * it cannot swallow a rise the gang could act on.
+ */
+export const WANTED_NOISE_FLOOR = 0.1;
+
+/**
  * How long a cleanup crew keeps its members after the level stops needing them.
  *
  * THE SIZE PROBLEM, in milliseconds. A crew is assigned on one game tick and released on the
@@ -974,7 +995,13 @@ export function wantedAttentionReason(
     if (g.wantedLevel <= WANTED_LEVEL_FLOOR && g.wantedLevelGainRate <= 0) return null;
 
     if (g.wantedPenalty < c.wantedPenaltyTarget) return "wanted-cleanup";
-    if (g.wantedLevelGainRate > 0) return "wanted-cleanup";
+    // A RISE THE GANG CANNOT HELP ITSELF TO. `> 0` sent a member for a rise of 0.002 per
+    // cycle — the gang merely being alive — while one cleaner removes ~11. The crew arrives,
+    // clamps the level to 1.00, and is released on the next tick: forty-three mode flips in
+    // eighty-eight frames in `runs/2026-11-04T09.48.28.372Z--34`.
+    //
+    // See `WANTED_NOISE_FLOOR` for why the figure sits where it does.
+    if (g.wantedLevelGainRate > WANTED_NOISE_FLOOR) return "wanted-cleanup";
 
     // The rate is not rising and the penalty is not short. Without a commitment that is
     // genuinely nothing to do; with one, the crew is what suppressed the rate.
