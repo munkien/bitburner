@@ -85,8 +85,49 @@ function explorerPrograms(ns: NS): typeof PORT_OPENERS {
 export function rootedHosts(ns: NS): string[] {
     const notHosts = hacknetServerNames(ns);
     return scanNetwork(ns).filter(host =>
-        host !== HOME && !notHosts.has(host) && ns.hasRootAccess(host),
+        host !== HOME && !notHosts.has(host) && hasRoot(ns, host),
     );
+}
+
+/**
+ * Whether the player has root on `host`, treating a vanished host as "no".
+ *
+ * THE WALK AND THE QUESTION ARE SEPARATE CALLS, and a server can stop existing between them.
+ * `scan` reports the reachable tree; by the time `hasRootAccess` or `getServerMaxRam` is asked
+ * about a name in it, that name may no longer resolve — `getServerMaxRam: Invalid host` —
+ * and the throw escapes the host list and kills the calling feature.
+ *
+ * Measured in `runs/2026-11-04T09.37.53.447Z--33`, on the first message of the session:
+ * hacking and share both faulted on `cloud-0`, and both recovered on a later pass.
+ *
+ * A HOST LIST IS A FILTER. Its job is to answer "which hosts are usable", and a host that
+ * cannot be read is not usable. Dropping one name is a shorter list; throwing is a dead
+ * feature, which is the far worse outcome and the one that actually happened.
+ */
+function hasRoot(ns: NS, host: string): boolean {
+    try {
+        return ns.hasRootAccess(host);
+    } catch {
+        return false;
+    }
+}
+
+/** `getServerMaxRam`, with a vanished host reading as zero rather than throwing. */
+export function maxRam(ns: NS, host: string): number {
+    try {
+        return ns.getServerMaxRam(host);
+    } catch {
+        return 0;
+    }
+}
+
+/** `getServerUsedRam`, with a vanished host reading as zero rather than throwing. */
+export function usedRam(ns: NS, host: string): number {
+    try {
+        return ns.getServerUsedRam(host);
+    } catch {
+        return 0;
+    }
 }
 
 /**
@@ -106,7 +147,7 @@ export function rootedHosts(ns: NS): string[] {
 export function workerHosts(ns: NS): string[] {
     const notHosts = hacknetServerNames(ns);
     return scanNetwork(ns).filter(host =>
-        (host === HOME || ns.hasRootAccess(host)) && !notHosts.has(host) && ns.getServerMaxRam(host) > 0,
+        (host === HOME || hasRoot(ns, host)) && !notHosts.has(host) && maxRam(ns, host) > 0,
     );
 }
 

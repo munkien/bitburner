@@ -2,7 +2,7 @@ import type { NS } from "@ns";
 
 import { canBuyReputation, type Context } from "./lib/context.ts";
 import { announce } from "./lib/log.ts";
-import { rootedHosts, scanNetwork } from "./lib/network.ts";
+import { maxRam as hostMaxRam, rootedHosts, scanNetwork, usedRam as hostUsedRam } from "./lib/network.ts";
 
 /*
  * ============================================================================
@@ -73,7 +73,7 @@ export async function tick(ns: NS, context: Context): Promise<void> {
 
     if (now - lastScanAt > CONFIG.SCAN_INTERVAL_MS || hosts.length === 0) {
         hosts = shareHosts(ns);
-        totalRam = hosts.reduce((sum, host) => sum + ns.getServerMaxRam(host), 0);
+        totalRam = hosts.reduce((sum, host) => sum + hostMaxRam(ns, host), 0);
         lastScanAt = now;
     }
 
@@ -119,12 +119,12 @@ export async function tick(ns: NS, context: Context): Promise<void> {
     }
 
     for (const host of hosts) {
-        const maxRam = ns.getServerMaxRam(host);
+        const maxRam = hostMaxRam(ns, host);
         if (maxRam === 0) continue;
 
         const processes = ns.ps(host).filter(process => process.filename === PAYLOAD_NAME);
         const running = processes.reduce((sum, process) => sum + process.threads, 0);
-        const target = targetThreads(maxRam, ns.getServerUsedRam(host), running, percentOfRam);
+        const target = targetThreads(maxRam, hostUsedRam(ns, host), running, percentOfRam);
 
         if (running === target && processes.length <= 1) continue;
 
@@ -132,7 +132,7 @@ export async function tick(ns: NS, context: Context): Promise<void> {
         if (target <= 0) continue;
 
         // Recompute after the kill: other scripts will have claimed the freed RAM.
-        const fresh = targetThreads(maxRam, ns.getServerUsedRam(host), 0, percentOfRam);
+        const fresh = targetThreads(maxRam, hostUsedRam(ns, host), 0, percentOfRam);
         if (fresh <= 0) continue;
 
         await ns.scp(PAYLOAD_NAME, host, "home");
@@ -160,7 +160,7 @@ export async function tick(ns: NS, context: Context): Promise<void> {
  * `workerHosts`, which includes home.
  */
 function shareHosts(ns: NS): string[] {
-    return rootedHosts(ns).filter(host => ns.getServerMaxRam(host) > 0);
+    return rootedHosts(ns).filter(host => hostMaxRam(ns, host) > 0);
 }
 
 /** Kill every share payload on the network, from a fresh scan rather than the cache. */

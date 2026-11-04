@@ -5,7 +5,7 @@ import { ACTION, ensureActionScripts } from "./actions.ts";
 import { announce } from "../../lib/log.ts";
 import { chooseBatch, isDisturbed, shouldReplan, type BatchPlan, type PlannerConfig } from "./plan.ts";
 import { growThreadsFor, readTargetFacts, timingAtPrep } from "./target-facts.ts";
-import { crackReachable, syncScript, workerHosts } from "../../lib/network.ts";
+import { crackReachable, maxRam, syncScript, usedRam, workerHosts } from "../../lib/network.ts";
 
 const CFG = {
     MAX_TARGETS: 8,
@@ -359,7 +359,12 @@ export function threadPool(
     let pool = 0;
     for (const host of hosts) {
         const reserved = host === "home" ? homeReserveGb : 0;
-        pool += Math.floor(Math.max(0, ns.getServerMaxRam(host) - reserved) / ramPerThread);
+        // `maxRam` READS 0 FOR A VANISHED HOST rather than throwing. `hosts` is cached from
+        // an earlier scan in the same pass and read again here, so a cloud server can be gone
+        // in between — `getServerMaxRam: Invalid host: 'cloud-0'` killed this feature in
+        // `runs/2026-11-04T09.37.53.447Z--33`. A host with no RAM contributes no threads,
+        // which is the correct answer rather than a failure.
+        pool += Math.floor(Math.max(0, maxRam(ns, host) - reserved) / ramPerThread);
     }
     return pool;
 }
@@ -382,7 +387,10 @@ function threadRam(ns: NS): number {
 
 function freeRam(ns: NS, h: string): number {
     const reserved = h === "home" ? homeReserveGb : 0;
-    return Math.max(0, ns.getServerMaxRam(h) - ns.getServerUsedRam(h) - reserved);
+    // Guarded for the same reason as the pool above: `h` comes from a list taken earlier in
+    // the pass, and the server may have been removed since. Zero free RAM is the honest
+    // answer for a machine that no longer exists.
+    return Math.max(0, maxRam(ns, h) - usedRam(ns, h) - reserved);
 }
 
 function getFree(ns: NS): Map<string, number> {
